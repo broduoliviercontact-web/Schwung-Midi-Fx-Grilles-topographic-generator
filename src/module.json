@@ -1,0 +1,158 @@
+{
+    "id": "grids",
+    "name": "Grilles",
+    "abbrev": "GR",
+    "version": "0.1.0",
+    "description": "Euclidean drum pattern sequencer, based on Mutable Instruments Grids",
+    "author": "Mutable Instruments (port: move-grids)",
+    "license": "MIT",
+    "dsp": "dsp.so",
+    "api_version": 1,
+    "capabilities": {
+        "audio_out": false,
+        "audio_in": false,
+        "midi_in": true,
+        "midi_out": true,
+        "chainable": true,
+        "component_type": "midi_fx",
+        "ui_hierarchy": {
+            "levels": {
+                "root": {
+                    "name": "Grilles",
+                    "knobs": [
+                        "map_x",
+                        "map_y",
+                        "density_kick",
+                        "density_snare",
+                        "density_hat",
+                        "randomness",
+                        "steps",
+                        "sync",
+                        "bpm"
+                    ],
+                    "params": [
+                        "map_x",
+                        "map_y",
+                        "density_kick",
+                        "density_snare",
+                        "density_hat",
+                        "randomness",
+                        "steps",
+                        "kick_note",
+                        "snare_note",
+                        "hat_note",
+                        "sync",
+                        "bpm"
+                    ]
+                }
+            }
+        }
+    },
+    "chain_params": [
+        {
+            "key": "map_x",
+            "name": "Map X",
+            "type": "float",
+            "min": 0.0,
+            "max": 1.0,
+            "default": 0.5,
+            "step": 0.01
+        },
+        {
+            "key": "map_y",
+            "name": "Map Y",
+            "type": "float",
+            "min": 0.0,
+            "max": 1.0,
+            "default": 0.5,
+            "step": 0.01
+        },
+        {
+            "key": "density_kick",
+            "name": "Kick",
+            "type": "float",
+            "min": 0.0,
+            "max": 1.0,
+            "default": 0.5,
+            "step": 0.01
+        },
+        {
+            "key": "density_snare",
+            "name": "Snare",
+            "type": "float",
+            "min": 0.0,
+            "max": 1.0,
+            "default": 0.5,
+            "step": 0.01
+        },
+        {
+            "key": "density_hat",
+            "name": "Hat",
+            "type": "float",
+            "min": 0.0,
+            "max": 1.0,
+            "default": 0.5,
+            "step": 0.01
+        },
+        {
+            "key": "randomness",
+            "name": "Chaos",
+            "type": "float",
+            "min": 0.0,
+            "max": 1.0,
+            "default": 0.0,
+            "step": 0.01
+        },
+        {
+            "key": "steps",
+            "name": "Steps",
+            "type": "int",
+            "min": 1,
+            "max": 32,
+            "default": 16,
+            "step": 1
+        },
+        {
+            "key": "kick_note",
+            "name": "Kick Note",
+            "type": "int",
+            "min": 0,
+            "max": 127,
+            "default": 36,
+            "step": 1
+        },
+        {
+            "key": "snare_note",
+            "name": "Snare Note",
+            "type": "int",
+            "min": 0,
+            "max": 127,
+            "default": 38,
+            "step": 1
+        },
+        {
+            "key": "hat_note",
+            "name": "Hat Note",
+            "type": "int",
+            "min": 0,
+            "max": 127,
+            "default": 42,
+            "step": 1
+        },
+        {
+            "key": "sync",
+            "name": "Sync",
+            "type": "enum",
+            "options": ["move", "internal"]
+        },
+        {
+            "key": "bpm",
+            "name": "BPM",
+            "type": "int",
+            "min": 40,
+            "max": 240,
+            "default": 120,
+            "step": 1
+        }
+    ]
+}
