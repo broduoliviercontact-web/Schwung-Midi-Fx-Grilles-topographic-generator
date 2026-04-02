@@ -68,6 +68,14 @@ typedef struct {
     /* Configurable output notes */
     uint8_t  note[GRIDS_NUM_LANES];
 
+    /* UI-only flag: stored and returned, DSP does not use it */
+    uint8_t  grid_view;
+
+    /* UI preview cache: 32-step ASCII lanes, same alphabet as make test */
+    char     preview[GRIDS_NUM_LANES][GRIDS_NUM_STEPS + 1];
+    uint32_t preview_revision;
+    uint8_t  preview_dirty;
+
     /* Scheduled note-offs so downstream synths see non-zero note lengths */
     PendingNoteOff pending[GRIDS_NUM_LANES];
 } GridsInstance;
@@ -125,10 +133,7 @@ static float current_bpm(const GridsInstance *gi)
     if (gi && gi->sync_mode != 0) {
         return (float)gi->internal_bpm;
     }
-    if (g_host && g_host->get_bpm) {
-        float bpm = g_host->get_bpm();
-        if (bpm >= 20.0f && bpm <= 400.0f) return bpm;
-    }
+    /* Avoid calling g_host->get_bpm() until host struct layout is confirmed. */
     return DEFAULT_BPM;
 }
 
@@ -230,6 +235,64 @@ static int do_step(GridsInstance *gi,
     return count;
 }
 
+static void mark_preview_dirty(GridsInstance *gi)
+{
+    if (gi) gi->preview_dirty = 1;
+}
+
+static void refresh_preview_cache(GridsInstance *gi)
+{
+    if (!gi || !gi->preview_dirty) return;
+
+    GridsEngine preview = gi->engine;
+    preview.step = 0;
+    preview.rng_state = 0xDEADBEEFu;
+    for (int lane = 0; lane < GRIDS_NUM_LANES; lane++) {
+        preview.trigger[lane] = false;
+        preview.accent[lane] = false;
+    }
+
+    for (int s = 0; s < GRIDS_NUM_STEPS; s++) {
+        grids_tick(&preview);
+
+        for (int lane = 0; lane < GRIDS_NUM_LANES; lane++) {
+            bool fire = grids_get_trigger(&preview, lane);
+            bool acc  = grids_get_accent(&preview, lane);
+            gi->preview[lane][s] = fire ? (acc ? 'A' : 'X') : '.';
+        }
+
+        if (preview.step >= gi->step_length) {
+            preview.step = 0;
+        }
+    }
+
+    for (int lane = 0; lane < GRIDS_NUM_LANES; lane++) {
+        gi->preview[lane][GRIDS_NUM_STEPS] = '\0';
+    }
+
+    gi->preview_dirty = 0;
+    gi->preview_revision++;
+}
+
+static int write_preview_chunk(GridsInstance *gi, int lane, int offset,
+                               char *buf, int buf_len)
+{
+    char chunk[5];
+
+    if (!gi || !buf || buf_len <= 0) return -1;
+    if (lane < 0 || lane >= GRIDS_NUM_LANES) return -1;
+    if (offset < 0 || offset > (GRIDS_NUM_STEPS - 4)) return -1;
+
+    refresh_preview_cache(gi);
+
+    for (int i = 0; i < 4; i++) {
+        chunk[i] = gi->preview[lane][offset + i];
+    }
+    chunk[4] = '\0';
+
+    return snprintf(buf, buf_len, "%s", chunk);
+}
+
 /* -------------------------------------------------------------------------
  * midi_fx_api_v1_t callbacks
  * ---------------------------------------------------------------------- */
@@ -251,7 +314,7 @@ static void *grids_create_instance(const char *module_dir,
     grids_set_randomness(&gi->engine, 0);
 
     gi->frames_until_tick = frames_per_step(44100, DEFAULT_BPM);
-    gi->clock_running = 0;
+    gi->clock_running = 1;  /* always running — no host clock query */
     gi->sync_mode = 0;
     gi->step_length = DEFAULT_STEP_LENGTH;
     gi->internal_bpm = (uint16_t)DEFAULT_BPM;
@@ -259,6 +322,7 @@ static void *grids_create_instance(const char *module_dir,
     gi->note[0] = DEFAULT_NOTE_KICK;
     gi->note[1] = DEFAULT_NOTE_SNARE;
     gi->note[2] = DEFAULT_NOTE_HAT;
+    gi->preview_dirty = 1;
 
     return gi;
 }
@@ -318,18 +382,7 @@ static int grids_plugin_tick(void *instance,
     int count = advance_pending_notes(gi, nf, out_msgs, out_lens, max_out, 0);
     if (count >= max_out) return count;
 
-    if (gi->sync_mode == 0 && g_host && g_host->get_clock_status) {
-        int status = g_host->get_clock_status();
-        if (status == MOVE_CLOCK_STATUS_STOPPED ||
-            status == MOVE_CLOCK_STATUS_UNAVAILABLE) {
-            gi->clock_running = 0;
-        } else if (status == MOVE_CLOCK_STATUS_RUNNING && !gi->clock_running) {
-            gi->clock_running = 1;
-        }
-    } else if (gi->sync_mode != 0) {
-        gi->clock_running = 1;
-    }
-
+    /* clock_running is always 1 after init; 0xFC (Stop) can pause it */
     if (!gi->clock_running) return count;
 
     if (gi->frames_until_tick <= nf) {
@@ -363,6 +416,7 @@ static void grids_set_param(void *instance, const char *key, const char *val)
         if (gi->engine.step >= gi->step_length) {
             gi->engine.step = 0;
         }
+        mark_preview_dirty(gi);
     }
     else if (strcmp(key, "sync")          == 0) {
         gi->sync_mode = parse_sync_mode(val);
@@ -385,6 +439,17 @@ static void grids_set_param(void *instance, const char *key, const char *val)
         gi->note[1] = parse_note(val);
     else if (strcmp(key, "hat_note")      == 0)
         gi->note[2] = parse_note(val);
+    else if (strcmp(key, "grid_view")     == 0)
+        gi->grid_view = (atoi(val) != 0) ? 1 : 0;
+
+    if (strcmp(key, "map_x") == 0 ||
+        strcmp(key, "map_y") == 0 ||
+        strcmp(key, "density_kick") == 0 ||
+        strcmp(key, "density_snare") == 0 ||
+        strcmp(key, "density_hat") == 0 ||
+        strcmp(key, "randomness") == 0) {
+        mark_preview_dirty(gi);
+    }
 }
 
 static int grids_get_param(void *instance, const char *key,
@@ -405,6 +470,38 @@ static int grids_get_param(void *instance, const char *key,
         return snprintf(buf, buf_len, "%d", gi->note[1]);
     if (strcmp(key, "hat_note") == 0)
         return snprintf(buf, buf_len, "%d", gi->note[2]);
+    if (strcmp(key, "grid_view") == 0)
+        return snprintf(buf, buf_len, "%d", gi->grid_view);
+    if (strcmp(key, "play_step") == 0)
+        return snprintf(buf, buf_len, "%u", gi->engine.step);
+    if (strcmp(key, "preview_rev") == 0) {
+        refresh_preview_cache(gi);
+        return snprintf(buf, buf_len, "%u", gi->preview_revision);
+    }
+    if (strcmp(key, "preview_kick") == 0) {
+        refresh_preview_cache(gi);
+        return snprintf(buf, buf_len, "%s", gi->preview[0]);
+    }
+    if (strcmp(key, "preview_snare") == 0) {
+        refresh_preview_cache(gi);
+        return snprintf(buf, buf_len, "%s", gi->preview[1]);
+    }
+    if (strcmp(key, "preview_hat") == 0) {
+        refresh_preview_cache(gi);
+        return snprintf(buf, buf_len, "%s", gi->preview[2]);
+    }
+    if (strcmp(key, "preview_kick_1") == 0)  return write_preview_chunk(gi, 0,  0, buf, buf_len);
+    if (strcmp(key, "preview_kick_2") == 0)  return write_preview_chunk(gi, 0,  4, buf, buf_len);
+    if (strcmp(key, "preview_kick_3") == 0)  return write_preview_chunk(gi, 0,  8, buf, buf_len);
+    if (strcmp(key, "preview_kick_4") == 0)  return write_preview_chunk(gi, 0, 12, buf, buf_len);
+    if (strcmp(key, "preview_snare_1") == 0) return write_preview_chunk(gi, 1,  0, buf, buf_len);
+    if (strcmp(key, "preview_snare_2") == 0) return write_preview_chunk(gi, 1,  4, buf, buf_len);
+    if (strcmp(key, "preview_snare_3") == 0) return write_preview_chunk(gi, 1,  8, buf, buf_len);
+    if (strcmp(key, "preview_snare_4") == 0) return write_preview_chunk(gi, 1, 12, buf, buf_len);
+    if (strcmp(key, "preview_hat_1") == 0)   return write_preview_chunk(gi, 2,  0, buf, buf_len);
+    if (strcmp(key, "preview_hat_2") == 0)   return write_preview_chunk(gi, 2,  4, buf, buf_len);
+    if (strcmp(key, "preview_hat_3") == 0)   return write_preview_chunk(gi, 2,  8, buf, buf_len);
+    if (strcmp(key, "preview_hat_4") == 0)   return write_preview_chunk(gi, 2, 12, buf, buf_len);
 
     float v = -1.0f;
     if      (strcmp(key, "map_x")         == 0) v = gi->engine.map_x      / 255.0f;

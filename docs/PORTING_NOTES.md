@@ -32,6 +32,8 @@ This document tracks the porting process of the Mutable Instruments Grids drum-p
 | 2026-04-01 | `src/host/`    | Rewritten for Schwung MIDI FX ABI v1 (`move_midi_fx_init`) | Complete |
 | 2026-04-01 | `src/module.json` | MIDI FX schema + editable output notes      | Complete |
 | 2026-04-01 | `src/ui/ui.js` | Added note focus/edit UI + dynamic trigger flash tracking | Complete |
+| 2026-04-02 | `src/host/` + `src/ui/ui.js` | Added cached 32-step live preview in `grid_view`, driven from current engine params | Complete |
+| 2026-04-02 | `src/host/` + `src/module.json` | Trialed standard Schwung UI preview exposure for `midi_fx`, then removed it pending a better UX direction | Complete |
 
 ## Known Deviations from Original Grids
 

@@ -36,10 +36,7 @@ ssh "${MOVE_USER}@${MOVE_HOST}" "mkdir -p ${MOVE_MODULES_DIR}/${MODULE_CATEGORY}
 # ── Copy files ───────────────────────────────────────────────────────────────
 scp src/module.json         "${DEST}/module.json"
 scp "$DSO"                  "${DEST}/dsp.so"
-ssh "${MOVE_USER}@${MOVE_HOST}" \
-    "rm -f ${MOVE_MODULES_DIR}/${MODULE_CATEGORY}/${MODULE_ID}/ui.js \
-           ${MOVE_MODULES_DIR}/${MODULE_CATEGORY}/${MODULE_ID}/font.png \
-           ${MOVE_MODULES_DIR}/${MODULE_CATEGORY}/${MODULE_ID}/font.png.dat"
+scp src/ui/ui.js            "${DEST}/ui.js"
 
 echo ""
 echo "✓ Installed to ${MOVE_MODULES_DIR}/${MODULE_CATEGORY}/${MODULE_ID}/"

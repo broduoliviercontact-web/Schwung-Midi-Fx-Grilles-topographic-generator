@@ -88,6 +88,7 @@ const STEP_FOCUS = {
   16: 'kick_note',
   17: 'snare_note',
   18: 'hat_note',
+  19: 'grid_view',
 };
 
 const PARAM_DEFAULTS = {
@@ -100,19 +101,17 @@ const PARAM_DEFAULTS = {
   kick_note:     36,
   snare_note:    38,
   hat_note:      42,
+  grid_view:     0,
 };
 
 // Trigger flash duration in ticks (~44 ticks/s)
 const FLASH_TICKS = 5;
+const GRID_VIEW_STEPS = 16;
 
 // Pad glow thresholds (normalised XY distance)
 const PAD_BRIGHT_NEAR = 0.07;   // 127
 const PAD_BRIGHT_MED  = 0.22;   // 50
 const PAD_BRIGHT_FAR  = 0.45;   // 12
-
-// Approximate ticks per step at 120 BPM, 1/16 note
-// frames_per_step=5512, frames_per_tick=128 → ~43 ticks/step
-const TICKS_PER_STEP = 43;
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * Module state  (pure data, no DOM)
@@ -121,11 +120,14 @@ const TICKS_PER_STEP = 43;
 const g = {
   params: { ...PARAM_DEFAULTS },
 
-  step:        0,        // 0..31 (derived from tick count)
-  tickCount:   0,
+  step:        0,        // 0..31 (read back from DSP host)
 
   // Per-lane trigger flash counters (counts down from FLASH_TICKS to 0)
   flash:       [0, 0, 0],   // 0=kick, 1=snare, 2=hat
+
+  // Preview grid: 3 lanes × 32 steps. 0=empty, 1=trigger, 2=accent
+  previewGrid: [new Uint8Array(32), new Uint8Array(32), new Uint8Array(32)],
+  previewRev:  -1,
 
   focused:     null,     // param key currently focused by track button / last knob
 
@@ -172,6 +174,7 @@ function clampParam(key, value) {
     const rounded = Math.round(value);
     return rounded < 0 ? 0 : rounded > 127 ? 127 : rounded;
   }
+  if (key === 'grid_view') return value ? 1 : 0;
   return clamp01(value);
 }
 
@@ -179,6 +182,7 @@ function formatParamValue(key, value) {
   if (key === 'kick_note' || key === 'snare_note' || key === 'hat_note') {
     return String(Math.round(value));
   }
+  if (key === 'grid_view') return String(value ? 1 : 0);
   return value.toFixed(4);
 }
 
@@ -187,6 +191,37 @@ function paramDelta(key, delta) {
     return delta;
   }
   return delta * 0.005;
+}
+
+function laneCharToCell(ch) {
+  if (ch === 'A') return 2;
+  if (ch === 'X') return 1;
+  return 0;
+}
+
+function loadPreviewLane(raw, lane) {
+  const target = g.previewGrid[lane];
+  for (let i = 0; i < 32; i++) {
+    target[i] = laneCharToCell(raw && i < raw.length ? raw[i] : '.');
+  }
+}
+
+function refreshPreview(force = false) {
+  const rawRev = host_module_get_param('preview_rev');
+  const rev = rawRev !== undefined && rawRev !== null ? parseInt(rawRev, 10) : NaN;
+  if (!force && Number.isFinite(rev) && rev === g.previewRev) return;
+
+  loadPreviewLane(host_module_get_param('preview_kick') || '', 0);
+  loadPreviewLane(host_module_get_param('preview_snare') || '', 1);
+  loadPreviewLane(host_module_get_param('preview_hat') || '', 2);
+  if (Number.isFinite(rev)) g.previewRev = rev;
+}
+
+function refreshPlayhead() {
+  const raw = host_module_get_param('play_step');
+  if (raw === undefined || raw === null) return;
+  const step = parseInt(raw, 10);
+  if (Number.isFinite(step)) g.step = step & 31;
 }
 
 /** Write a single param value to the DSP. */
@@ -209,21 +244,19 @@ function drawBar(bx, by, bw, bh, value) {
   if (filled < bw) fill_rect(bx + filled, by, bw - filled, bh, 0);
 }
 
-function render() {
-  clear_screen();
-
+function renderParams() {
   const p = g.params;
 
-  /* ── Row 0: title + trigger flash + step number ──────────────────── */
-  const kDot = g.flash[0] > 0 ? '\xA3' : 'o';  // substitute real ● with printable char
-  const sDot = g.flash[1] > 0 ? '\xA3' : 'o';
-  const hDot = g.flash[2] > 0 ? '\xA3' : 'o';
+  /* ── Row 0: title + trigger indicators + step number ─────────────── */
+  const kDot = g.flash[0] > 0 ? '*' : '.';
+  const sDot = g.flash[1] > 0 ? '*' : '.';
+  const hDot = g.flash[2] > 0 ? '*' : '.';
   const stepNum = String(g.step + 1).padStart(2, '0');
   print(0,  0, 'GRIDS', 1);
-  print(44, 0, `K${kDot} S${sDot} H${hDot}`, 1);
+  print(44, 0, `K${kDot}S${sDot}H${hDot}`, 1);
   print(104, 0, stepNum, 1);
 
-  /* ── Row 1: Map X bar (label + 110px bar) ────────────────────────── */
+  /* ── Row 1: Map X bar ────────────────────────────────────────────── */
   print(0, 10, 'X', 1);
   drawBar(10, 11, 114, 5, p.map_x);
 
@@ -231,40 +264,100 @@ function render() {
   print(0, 18, 'Y', 1);
   drawBar(10, 19, 114, 5, p.map_y);
 
-  /* ── Row 3: Density bars (K / S / H, each ~35px) ────────────────── */
-  const dw = 32;  // density bar inner width
-  const focK = g.focused === 'density_kick'  ? '\xBB' : ' ';
-  const focS = g.focused === 'density_snare' ? '\xBB' : ' ';
-  const focH = g.focused === 'density_hat'   ? '\xBB' : ' ';
+  /* ── Row 3: Density bars ─────────────────────────────────────────── */
+  const dw = 32;
+  const focK = g.focused === 'density_kick'  ? '>' : ' ';
+  const focS = g.focused === 'density_snare' ? '>' : ' ';
+  const focH = g.focused === 'density_hat'   ? '>' : ' ';
   print(0,  26, `K${focK}`, 1);  drawBar(13, 27, dw, 5, p.density_kick);
   print(48, 26, `S${focS}`, 1);  drawBar(61, 27, dw, 5, p.density_snare);
   print(96, 26, `H${focH}`, 1);  drawBar(109, 27, dw - 15, 5, p.density_hat);
 
   /* ── Row 4: Chaos bar ────────────────────────────────────────────── */
-  const focC = g.focused === 'randomness' ? '\xBB' : ' ';
+  const focC = g.focused === 'randomness' ? '>' : ' ';
   print(0, 34, `~${focC}`, 1);
   drawBar(13, 35, 111, 5, p.randomness);
 
-  const focKN = g.focused === 'kick_note' ? '\xBB' : ' ';
-  const focSN = g.focused === 'snare_note' ? '\xBB' : ' ';
-  const focHN = g.focused === 'hat_note' ? '\xBB' : ' ';
-  print(0, 42, `N${focKN}K${p.kick_note} S${focSN}${p.snare_note} H${focHN}${p.hat_note}`, 1);
+  /* ── Row 5: Note values ──────────────────────────────────────────── */
+  const focKN = g.focused === 'kick_note'  ? '>' : ' ';
+  const focSN = g.focused === 'snare_note' ? '>' : ' ';
+  const focHN = g.focused === 'hat_note'   ? '>' : ' ';
+  print(0, 42, `K${focKN}${p.kick_note} S${focSN}${p.snare_note} H${focHN}${p.hat_note}`, 1);
 
-  /* ── Step runner (y=50..63, 14px high) ───────────────────────────── */
-  // Tick marks every 4px for 32 steps
-  for (let s = 0; s < 32; s++) {
-    const sx = s * 4;
-    if (s === g.step) {
-      // Current step: filled column
-      fill_rect(sx, 50, 3, 14, 1);
-      // Show active lanes as inverted dots within the filled column
-      if (g.flash[0] > 0) fill_rect(sx, 60, 3, 3, 0);  // kick (bottom)
-      if (g.flash[1] > 0) fill_rect(sx, 56, 3, 3, 0);  // snare (mid)
-      if (g.flash[2] > 0) fill_rect(sx, 52, 3, 3, 0);  // hat (top)
-    } else {
-      // Other steps: small tick + lane dots
-      set_pixel(sx + 1, 57, 1);  // centre tick
+  /* ── Row 6: Grid view toggle ─────────────────────────────────────── */
+  const focV = g.focused === 'grid_view' ? '>' : ' ';
+  const viewLabel = g.params.grid_view ? 'ON ' : 'OFF';
+  print(0, 54, `GRID${focV}${viewLabel}`, 1);
+}
+
+function renderGrid() {
+  /* Full-screen step grid — compact 16-step preview.
+   * 3 lanes × 16 visible steps. Display 128×64.
+   * Lane row heights: 16px each, leaving 16px for header.
+   * Each step cell uses 8 px stride → 16 steps fill the screen width.
+   * cell=0 → single dot   cell=1 → outline rect   cell=2 → filled (accent)
+   * Current step → inverted (white bg, black content). */
+
+  /* ── Header: lane labels + step counter ─────────────────────────── */
+  const stepNum = String(g.step + 1).padStart(2, '0');
+  print(0,  0, 'K', 1);
+  print(0, 18, 'S', 1);
+  print(0, 36, 'H', 1);
+  print(110, 0, stepNum, 1);
+
+  /* step separator line */
+  fill_rect(0, 14, 128, 1, 1);
+
+  const LANE_Y  = [1, 19, 37];   // top-left y of each lane row
+  const CELL_H  = 12;            // cell height (px)
+  const CELL_W  = 5;
+  const STEP_W  = 8;             // step stride
+  const X0      = 0;
+  const visibleStep = g.step % GRID_VIEW_STEPS;
+
+  for (let s = 0; s < GRID_VIEW_STEPS; s++) {
+    const sx  = X0 + s * STEP_W;
+    const cur = s === visibleStep;
+
+    if (s > 0 && s % 4 === 0) {
+      fill_rect(sx - 1, 1, 1, 48, 1);
     }
+
+    for (let lane = 0; lane < 3; lane++) {
+      const ry   = LANE_Y[lane];
+      const cell = g.previewGrid[lane][s];
+
+      if (cur) {
+        // current step: filled column, content inverted
+        fill_rect(sx, ry, CELL_W, CELL_H, 1);
+        if (cell === 0) {
+          // empty: hollow centre
+          fill_rect(sx + 1, ry + 4, 1, 4, 0);
+        } else if (cell === 1) {
+          // trigger: inverted solid block
+          fill_rect(sx, ry + 2, CELL_W, CELL_H - 4, 0);
+        }
+        // accent (cell===2): stays fully filled
+      } else if (cell === 2) {
+        fill_rect(sx, ry + 1, CELL_W, CELL_H - 2, 1);   // accent: tall filled
+      } else if (cell === 1) {
+        fill_rect(sx, ry + 3, CELL_W, CELL_H - 6, 1);   // trigger: short filled
+      } else {
+        set_pixel(sx + 1, ry + 5, 1);                    // empty: dot
+      }
+    }
+  }
+
+  /* ── Bottom hint ─────────────────────────────────────────────────── */
+  print(0, 54, '[43: params]', 1);
+}
+
+function render() {
+  clear_screen();
+  if (g.params.grid_view) {
+    renderGrid();
+  } else {
+    renderParams();
   }
 }
 
@@ -305,20 +398,19 @@ globalThis.init = function () {
       g.params[key] = parseFloat(raw);
     }
   }
+  refreshPreview(true);
+  refreshPlayhead();
   g.padDirty = true;
 };
 
 globalThis.tick = function () {
-  g.tickCount++;
-
-  // Derive step from tick count (internal clock at 120 BPM, 1/16 note)
-  // Switches to MIDI-driven step when external clock is active (see onMidiMessageExternal)
-  g.step = Math.floor(g.tickCount / TICKS_PER_STEP) % 32;
-
   // Age flash counters
   for (let i = 0; i < 3; i++) {
     if (g.flash[i] > 0) g.flash[i]--;
   }
+
+  refreshPlayhead();
+  refreshPreview();
 
   render();
 
@@ -359,14 +451,22 @@ globalThis.onMidiMessageInternal = function (data) {
 
     // Jog wheel → fine-tune focused param (±0.5% per click)
     if (b1 === CC_JOG_WHEEL && g.focused) {
+      if (g.focused === 'grid_view') {
+        setParam('grid_view', decodeDelta(b2) > 0 ? 1 : 0);
+        return;
+      }
       const delta = paramDelta(g.focused, decodeDelta(b2));
       setParam(g.focused, g.params[g.focused] + delta);
       if (g.focused === 'map_x' || g.focused === 'map_y') g.padDirty = true;
       return;
     }
 
-    // Jog click → reset focused param to default
+    // Jog click → toggle grid_view if focused, else reset param to default
     if (b1 === CC_JOG_CLICK && b2 > 0 && g.focused) {
+      if (g.focused === 'grid_view') {
+        setParam('grid_view', g.params.grid_view ? 0 : 1);
+        return;
+      }
       setParam(g.focused, PARAM_DEFAULTS[g.focused]);
       if (g.focused === 'map_x' || g.focused === 'map_y') g.padDirty = true;
       return;
@@ -400,6 +500,7 @@ globalThis.onMidiMessageExternal = function (data) {
   const b2     = data.length > 2 ? data[2] : 0;
 
   // DSP sends note-on on channel 1 (0x90) for triggers
+  // velocity 127 = accent, 80 = normal
   if (status === 0x90 && b2 > 0) {
     if (b1 === g.params.kick_note)  g.flash[0] = FLASH_TICKS;
     if (b1 === g.params.snare_note) g.flash[1] = FLASH_TICKS;
@@ -409,21 +510,11 @@ globalThis.onMidiMessageExternal = function (data) {
 
   // MIDI clock (0xF8) — sync step counter to external tempo
   if (status === 0xF8) {
-    // Count pulses: 6 pulses per step (1/16 note at 24 PPQN)
-    // Use tickCount as scratch; reset on 0xFA (Start)
-    if (!g._clockPulses) g._clockPulses = 0;
-    g._clockPulses++;
-    if (g._clockPulses >= 6) {
-      g._clockPulses = 0;
-      g.step = (g.step + 1) & 31;
-    }
     return;
   }
 
   // MIDI Start (0xFA) — reset step
   if (status === 0xFA) {
-    g.step = 0;
-    g._clockPulses = 0;
     return;
   }
 };
