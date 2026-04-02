@@ -16,6 +16,37 @@
 
 extern midi_fx_api_v1_t *move_midi_fx_init(const host_api_v1_t *host);
 
+static float g_fake_bpm = 120.0f;
+static int g_fake_clock_status = MOVE_CLOCK_STATUS_RUNNING;
+
+static float fake_get_bpm(void)
+{
+    return g_fake_bpm;
+}
+
+static int fake_get_clock_status(void)
+{
+    return g_fake_clock_status;
+}
+
+static int blocks_until_note_on(midi_fx_api_v1_t *api, void *instance)
+{
+    uint8_t out[16][3];
+    int lens[16];
+    const uint8_t start_msg[1] = { 0xFA };
+
+    api->process_midi(instance, start_msg, 1, out, lens, 16);
+
+    for (int i = 0; i < 256; i++) {
+        int count = api->tick(instance, 128, 44100, out, lens, 16);
+        for (int j = 0; j < count; j++) {
+            if ((out[j][0] & 0xF0) == 0x90 && out[j][2] > 0) return i;
+        }
+    }
+
+    return -1;
+}
+
 static void fail(const char *msg)
 {
     fprintf(stderr, "FAIL: %s\n", msg);
@@ -24,7 +55,10 @@ static void fail(const char *msg)
 
 int main(void)
 {
-    const host_api_v1_t host = {0};
+    const host_api_v1_t host = {
+        .get_clock_status = fake_get_clock_status,
+        .get_bpm = fake_get_bpm,
+    };
     midi_fx_api_v1_t *api = move_midi_fx_init(&host);
     if (!api) fail("move_midi_fx_init returned NULL");
 
@@ -71,6 +105,43 @@ int main(void)
     if (!saw_note_on) fail("wrapper never emitted a note-on");
     if (saw_same_block_note_off) fail("note-off was emitted in the same block as first note-on");
     if (!saw_later_note_off) fail("wrapper never emitted a later note-off");
+
+    /* Move sync should follow host BPM. */
+    g_fake_bpm = 240.0f;
+    void *fast_instance = api->create_instance(NULL, NULL);
+    if (!fast_instance) fail("create_instance returned NULL for fast BPM test");
+    api->set_param(fast_instance, "density_kick", "1.0");
+
+    g_fake_bpm = 60.0f;
+    void *slow_instance = api->create_instance(NULL, NULL);
+    if (!slow_instance) fail("create_instance returned NULL for slow BPM test");
+    api->set_param(slow_instance, "density_kick", "1.0");
+
+    g_fake_clock_status = MOVE_CLOCK_STATUS_RUNNING;
+    g_fake_bpm = 240.0f;
+    int fast_blocks = blocks_until_note_on(api, fast_instance);
+    g_fake_bpm = 60.0f;
+    int slow_blocks = blocks_until_note_on(api, slow_instance);
+
+    api->destroy_instance(fast_instance);
+    api->destroy_instance(slow_instance);
+
+    if (fast_blocks < 0 || slow_blocks < 0) fail("wrapper never emitted note-on in BPM sync test");
+    if (fast_blocks >= slow_blocks) fail("host BPM does not affect move-sync timing");
+
+    /* Move sync should stop when the host transport is stopped. */
+    void *stopped_instance = api->create_instance(NULL, NULL);
+    if (!stopped_instance) fail("create_instance returned NULL for clock-stop test");
+    api->set_param(stopped_instance, "density_kick", "1.0");
+    g_fake_bpm = 120.0f;
+    g_fake_clock_status = MOVE_CLOCK_STATUS_STOPPED;
+
+    for (int i = 0; i < 64; i++) {
+        int count = api->tick(stopped_instance, 128, 44100, out, lens, 16);
+        if (count > 0) fail("wrapper emitted MIDI while host clock was stopped");
+    }
+
+    api->destroy_instance(stopped_instance);
 
     puts("PASS: wrapper emits note-ons with non-zero duration");
     return 0;

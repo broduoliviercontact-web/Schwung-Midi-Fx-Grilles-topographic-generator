@@ -90,24 +90,117 @@ The module installs to:
 /data/UserData/schwung/modules/midi_fx/grids
 ```
 
-## Usage
+## Tutorial
 
-Grilles is a MIDI FX module:
+### What Grilles Actually Does
 
-1. Insert **Grilles** in a chain's MIDI FX slot
-2. Route the chain into a synth, sampler, drum module, or MIDI destination
-3. Press **Play** when `Sync = move`, or use `Sync = internal` for free-running behavior
-4. Shape the groove with `Map X`, `Map Y`, lane densities, `Chaos`, and `Steps`
-5. Adjust output note mapping if your downstream instrument expects different note numbers
+Grilles generates drum trigger notes on three lanes:
 
-Typical workflow:
+- kick
+- snare
+- hat
 
-1. Start with `Steps = 16`
-2. Set `Sync = move`
-3. Move `Map X` and `Map Y` until the pattern feels right
-4. Raise or lower `Kick`, `Snare`, and `Hat` independently
-5. Add a little `Chaos`
-6. Reduce `Steps` if you want a tighter repeating loop
+Those triggers are sent downstream to whatever instrument, drum rack, sampler, or MIDI target sits after it in the Schwung chain.
+
+### Basic Setup
+
+1. Insert **Grilles** in a chain's MIDI FX slot.
+2. Put a drum destination after it in the same chain.
+3. Start with these values:
+   - `Steps = 16`
+   - `Sync = move`
+   - `Map X = 0.5`
+   - `Map Y = 0.5`
+   - `Kick = 0.5`
+   - `Snare = 0.5`
+   - `Hat = 0.5`
+   - `Chaos = 0.0`
+4. Press `Play` on Move.
+
+### Important Current Limitation
+
+Grilles currently runs as a `midi_fx` module. On the current Schwung/Move runtime, that means the chain may not fully wake up from transport alone.
+
+In practice:
+
+- `Play` by itself may not start the Grilles sequence immediately
+- the sequence usually starts as soon as the chain receives an incoming MIDI note
+
+Reliable workaround:
+
+1. Start playback on Move.
+2. Send or play a MIDI note into the chain once.
+3. Leave a held note, a simple trigger clip, or some other MIDI activity upstream if you want the chain to stay reliably active.
+
+This is a runtime limitation of the current `midi_fx` integration model, not the intended long-term UX for Grilles.
+
+### First Groove in 30 Seconds
+
+1. Set `Sync = move`.
+2. Set `Steps = 16`.
+3. Raise `Hat` first until you hear a steady pulse.
+4. Raise `Kick` until the groove gets weight.
+5. Raise `Snare` more conservatively.
+6. Move `Map X` left/right to change the family of pattern.
+7. Move `Map Y` up/down to shift the feel.
+8. Add a little `Chaos`, then stop before it gets messy.
+
+Good starter values:
+
+- `Map X = 0.50`
+- `Map Y = 0.50`
+- `Kick = 0.55`
+- `Snare = 0.45`
+- `Hat = 0.65`
+- `Chaos = 0.08`
+- `Steps = 16`
+
+### How to Listen to the Main Controls
+
+- `Map X`: changes which groove family you are in.
+- `Map Y`: changes the contour and feel of the pattern.
+- `Kick`: increases or reduces bass drum presence.
+- `Snare`: controls backbeat density and fills.
+- `Hat`: controls motion and perceived speed.
+- `Chaos`: adds variation and instability.
+- `Steps`: shortens the loop without changing the beginning of the phrase.
+
+### Practical Workflows
+
+#### Classic Drum Loop
+
+1. Keep `Steps = 16`.
+2. Keep `Chaos` low.
+3. Find a kick pattern with `Map X/Y`.
+4. Add snare until the backbeat sits correctly.
+5. Use hat density to create movement.
+
+#### Tight Repeating Phrase
+
+1. Find a good 16-step groove first.
+2. Reduce `Steps` to `12`, `8`, or `4`.
+3. Rebalance densities after shortening the loop.
+
+#### More Animated Pattern
+
+1. Start from a stable groove.
+2. Increase `Hat`.
+3. Add a little `Chaos`.
+4. Sweep `Map X` slowly while the loop plays.
+
+### Output Note Mapping
+
+If your downstream instrument does not respond correctly, check:
+
+- `kick_note`
+- `snare_note`
+- `hat_note`
+
+Defaults are standard GM-style drum notes:
+
+- `kick_note = 36`
+- `snare_note = 38`
+- `hat_note = 42`
 
 ## Parameters
 
@@ -160,9 +253,9 @@ These parameters define which MIDI notes Grilles sends downstream.
 In Move sync mode:
 
 - Grilles follows the Move transport
-- `Play` starts the sequence
-- `Stop` stops it
 - timing follows the current Move BPM
+- `Stop` stops it
+- on the current runtime, the chain may still need an incoming MIDI note to wake up the `midi_fx` slot
 
 ### `Sync = internal`
 
@@ -292,6 +385,7 @@ Current limitations and intentional differences from original Mutable Instrument
 - generated results are musically Grids-like, but not bit-identical
 - randomness implementation differs from the original firmware
 - some low-level timing and internal behavior are adapted for Move and Schwung
+- as a `midi_fx` module, Grilles may require incoming MIDI activity before the sequence starts, even when Move transport is already running
 
 For deeper implementation details, see:
 
@@ -307,7 +401,15 @@ For deeper implementation details, see:
 - Check that `Kick`, `Snare`, and `Hat` densities are not too low
 - Check output note numbers match the downstream target
 - If `Sync = move`, verify the Move transport is running
+- In `Sync = move`, send or play one MIDI note into the chain to wake the MIDI FX path
 - If `Sync = internal`, verify `BPM` is set and the module is active
+
+### Sequence only starts after playing a note
+
+- This is the current expected limitation of running Grilles as `midi_fx`
+- Press `Play`, then send one MIDI note into the chain
+- If needed, keep a held note or simple upstream trigger source active
+- If you need true transport-only autonomous startup, Grilles would need a different module architecture than the current `midi_fx` slot
 
 ### Sequence does not stop
 

@@ -133,7 +133,10 @@ static float current_bpm(const GridsInstance *gi)
     if (gi && gi->sync_mode != 0) {
         return (float)gi->internal_bpm;
     }
-    /* Avoid calling g_host->get_bpm() until host struct layout is confirmed. */
+    if (g_host && g_host->get_bpm) {
+        float bpm = g_host->get_bpm();
+        if (bpm >= 20.0f && bpm <= 400.0f) return bpm;
+    }
     return DEFAULT_BPM;
 }
 
@@ -314,7 +317,7 @@ static void *grids_create_instance(const char *module_dir,
     grids_set_randomness(&gi->engine, 0);
 
     gi->frames_until_tick = frames_per_step(44100, DEFAULT_BPM);
-    gi->clock_running = 1;  /* always running — no host clock query */
+    gi->clock_running = 1;
     gi->sync_mode = 0;
     gi->step_length = DEFAULT_STEP_LENGTH;
     gi->internal_bpm = (uint16_t)DEFAULT_BPM;
@@ -382,7 +385,17 @@ static int grids_plugin_tick(void *instance,
     int count = advance_pending_notes(gi, nf, out_msgs, out_lens, max_out, 0);
     if (count >= max_out) return count;
 
-    /* clock_running is always 1 after init; 0xFC (Stop) can pause it */
+    if (gi->sync_mode == 0 && g_host && g_host->get_clock_status) {
+        int status = g_host->get_clock_status();
+        if (status == MOVE_CLOCK_STATUS_STOPPED) {
+            gi->clock_running = 0;
+        } else if (status == MOVE_CLOCK_STATUS_RUNNING && !gi->clock_running) {
+            gi->clock_running = 1;
+        }
+    } else if (gi->sync_mode != 0) {
+        gi->clock_running = 1;
+    }
+
     if (!gi->clock_running) return count;
 
     if (gi->frames_until_tick <= nf) {
