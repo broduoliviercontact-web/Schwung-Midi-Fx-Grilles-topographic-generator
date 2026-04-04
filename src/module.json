@@ -28,7 +28,7 @@
                         "density_hat",
                         "randomness",
                         "steps",
-                        "bpm"
+                        "grid_view"
                     ],
                     "params": [
                         "map_x",
@@ -41,8 +41,7 @@
                         "kick_note",
                         "snare_note",
                         "hat_note",
-                        "sync",
-                        "bpm"
+                        "grid_view"
                     ]
                 }
             }
@@ -140,21 +139,12 @@
             "step": 1
         },
         {
-            "key": "sync",
-            "name": "Sync",
-            "type": "enum",
-            "options": [
-                "move",
-                "internal"
-            ]
-        },
-        {
-            "key": "bpm",
-            "name": "BPM",
+            "key": "grid_view",
+            "name": "Grid View",
             "type": "int",
-            "min": 40,
-            "max": 240,
-            "default": 120,
+            "min": 0,
+            "max": 1,
+            "default": 0,
             "step": 1
         }
     ]

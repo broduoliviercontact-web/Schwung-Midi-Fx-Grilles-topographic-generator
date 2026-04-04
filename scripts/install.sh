@@ -15,7 +15,7 @@ cd "$(dirname "$0")/.."
 
 MOVE_HOST="${1:-move.local}"
 MOVE_USER="root"
-MOVE_MODULES_DIR="/data/UserData/schwung/modules"
+MOVE_MODULES_DIR="/data/UserData/move-anything/modules"
 MODULE_CATEGORY="midi_fx"
 MODULE_ID="grids"
 DEST="${MOVE_USER}@${MOVE_HOST}:${MOVE_MODULES_DIR}/${MODULE_CATEGORY}/${MODULE_ID}"
@@ -38,11 +38,15 @@ scp src/module.json         "${DEST}/module.json"
 scp "$DSO"                  "${DEST}/dsp.so"
 scp src/ui/ui.js            "${DEST}/ui.js"
 
+# Font files must sit next to ui.js at the module root
+FONT_SRC="/data/UserData/schwung/host"
+ssh "${MOVE_USER}@${MOVE_HOST}" \
+    "cp ${FONT_SRC}/font.png ${MOVE_MODULES_DIR}/${MODULE_CATEGORY}/${MODULE_ID}/font.png && \
+     cp ${FONT_SRC}/font.png.dat ${MOVE_MODULES_DIR}/${MODULE_CATEGORY}/${MODULE_ID}/font.png.dat"
+
 echo ""
 echo "✓ Installed to ${MOVE_MODULES_DIR}/${MODULE_CATEGORY}/${MODULE_ID}/"
 echo ""
-echo "  On Move: open Schwung → Module Store → Installed"
-echo "  The 'Grilles' module should appear. Tap to load."
-echo ""
-echo "  If it doesn't appear, restart Schwung:"
-echo "    ssh ${MOVE_USER}@${MOVE_HOST} 'pkill -f schwung; sleep 1; schwung &'"
+echo "  Restarting Move service to pick up the new module…"
+ssh "${MOVE_USER}@${MOVE_HOST}" '/etc/init.d/move restart' || true
+echo "  Done. Add Grilles to a MIDI FX slot on the Move."

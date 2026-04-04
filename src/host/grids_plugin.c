@@ -32,8 +32,6 @@
 
 #define DEFAULT_BPM          120.0f
 #define DEFAULT_GATE_DIVISOR 3u
-#define MIN_INTERNAL_BPM     40u
-#define MAX_INTERNAL_BPM     240u
 #define DEFAULT_STEP_LENGTH  16u
 
 /* Default GM drum notes */
@@ -61,9 +59,7 @@ typedef struct {
 
     uint32_t frames_until_tick;
     uint8_t  clock_running;
-    uint8_t  sync_mode;
     uint8_t  step_length;
-    uint16_t internal_bpm;
 
     /* Configurable output notes */
     uint8_t  note[GRIDS_NUM_LANES];
@@ -102,15 +98,6 @@ static uint8_t parse_note(const char *s)
     return (uint8_t)v;
 }
 
-static uint16_t parse_bpm(const char *s)
-{
-    if (!s) return (uint16_t)DEFAULT_BPM;
-    int v = atoi(s);
-    if (v < (int)MIN_INTERNAL_BPM) v = MIN_INTERNAL_BPM;
-    if (v > (int)MAX_INTERNAL_BPM) v = MAX_INTERNAL_BPM;
-    return (uint16_t)v;
-}
-
 static uint8_t parse_steps(const char *s)
 {
     if (!s) return DEFAULT_STEP_LENGTH;
@@ -120,23 +107,8 @@ static uint8_t parse_steps(const char *s)
     return (uint8_t)v;
 }
 
-static uint8_t parse_sync_mode(const char *s)
+static float current_bpm(void)
 {
-    if (!s) return 0;
-    if (strcmp(s, "move") == 0) return 0;
-    if (strcmp(s, "internal") == 0) return 1;
-    return (uint8_t)(atoi(s) != 0);
-}
-
-static float current_bpm(const GridsInstance *gi)
-{
-    if (gi && gi->sync_mode != 0) {
-        return (float)gi->internal_bpm;
-    }
-    if (g_host && g_host->get_bpm) {
-        float bpm = g_host->get_bpm();
-        if (bpm >= 20.0f && bpm <= 400.0f) return bpm;
-    }
     return DEFAULT_BPM;
 }
 
@@ -318,9 +290,7 @@ static void *grids_create_instance(const char *module_dir,
 
     gi->frames_until_tick = frames_per_step(44100, DEFAULT_BPM);
     gi->clock_running = 1;
-    gi->sync_mode = 0;
     gi->step_length = DEFAULT_STEP_LENGTH;
-    gi->internal_bpm = (uint16_t)DEFAULT_BPM;
 
     gi->note[0] = DEFAULT_NOTE_KICK;
     gi->note[1] = DEFAULT_NOTE_SNARE;
@@ -343,19 +313,9 @@ static int grids_process_midi(void *instance,
     GridsInstance *gi = (GridsInstance *)instance;
     if (!gi || in_len == 0) return 0;
 
-    if (gi->sync_mode != 0) {
-        if (in_msg[0] == 0xFA) {
-            grids_engine_reset(&gi->engine);
-            gi->frames_until_tick = frames_per_step(44100, current_bpm(gi));
-            gi->clock_running = 1;
-            return flush_all_notes(gi, out_msgs, out_lens, max_out, 0);
-        }
-        return 0;
-    }
-
     if (in_msg[0] == 0xFA) {
         grids_engine_reset(&gi->engine);
-        gi->frames_until_tick = frames_per_step(44100, current_bpm(gi));
+        gi->frames_until_tick = frames_per_step(44100, current_bpm());
         gi->clock_running = 1;
         return flush_all_notes(gi, out_msgs, out_lens, max_out, 0);
     }
@@ -378,23 +338,12 @@ static int grids_plugin_tick(void *instance,
     GridsInstance *gi = (GridsInstance *)instance;
     if (!gi) return 0;
 
-    float bpm = current_bpm(gi);
+    float bpm = current_bpm();
     uint32_t fps = frames_per_step(sample_rate, bpm);
     uint32_t gate = frames_per_gate(sample_rate, bpm);
     uint32_t nf = (uint32_t)frames;
     int count = advance_pending_notes(gi, nf, out_msgs, out_lens, max_out, 0);
     if (count >= max_out) return count;
-
-    if (gi->sync_mode == 0 && g_host && g_host->get_clock_status) {
-        int status = g_host->get_clock_status();
-        if (status == MOVE_CLOCK_STATUS_STOPPED) {
-            gi->clock_running = 0;
-        } else if (status == MOVE_CLOCK_STATUS_RUNNING && !gi->clock_running) {
-            gi->clock_running = 1;
-        }
-    } else if (gi->sync_mode != 0) {
-        gi->clock_running = 1;
-    }
 
     if (!gi->clock_running) return count;
 
@@ -431,21 +380,6 @@ static void grids_set_param(void *instance, const char *key, const char *val)
         }
         mark_preview_dirty(gi);
     }
-    else if (strcmp(key, "sync")          == 0) {
-        gi->sync_mode = parse_sync_mode(val);
-        gi->frames_until_tick = frames_per_step(44100, current_bpm(gi));
-        if (gi->sync_mode != 0) {
-            gi->clock_running = 1;
-        } else if (g_host && g_host->get_clock_status) {
-            gi->clock_running = (uint8_t)(g_host->get_clock_status() == MOVE_CLOCK_STATUS_RUNNING);
-        }
-    }
-    else if (strcmp(key, "bpm")           == 0) {
-        gi->internal_bpm = parse_bpm(val);
-        if (gi->sync_mode != 0) {
-            gi->frames_until_tick = frames_per_step(44100, current_bpm(gi));
-        }
-    }
     else if (strcmp(key, "kick_note")     == 0)
         gi->note[0] = parse_note(val);
     else if (strcmp(key, "snare_note")    == 0)
@@ -472,19 +406,15 @@ static int grids_get_param(void *instance, const char *key,
     if (!gi || !key || !buf || buf_len <= 0) return -1;
 
     if (strcmp(key, "steps") == 0)
-        return snprintf(buf, buf_len, "%u", gi->step_length);
-    if (strcmp(key, "sync") == 0)
-        return snprintf(buf, buf_len, "%s", gi->sync_mode ? "internal" : "move");
-    if (strcmp(key, "bpm") == 0)
-        return snprintf(buf, buf_len, "%u", gi->internal_bpm);
+        { snprintf(buf, buf_len, "%u", gi->step_length);    return 0; }
     if (strcmp(key, "kick_note") == 0)
-        return snprintf(buf, buf_len, "%d", gi->note[0]);
+        { snprintf(buf, buf_len, "%d", gi->note[0]);        return 0; }
     if (strcmp(key, "snare_note") == 0)
-        return snprintf(buf, buf_len, "%d", gi->note[1]);
+        { snprintf(buf, buf_len, "%d", gi->note[1]);        return 0; }
     if (strcmp(key, "hat_note") == 0)
-        return snprintf(buf, buf_len, "%d", gi->note[2]);
+        { snprintf(buf, buf_len, "%d", gi->note[2]);        return 0; }
     if (strcmp(key, "grid_view") == 0)
-        return snprintf(buf, buf_len, "%d", gi->grid_view);
+        { snprintf(buf, buf_len, "%d", gi->grid_view);      return 0; }
     if (strcmp(key, "play_step") == 0)
         return snprintf(buf, buf_len, "%u", gi->engine.step);
     if (strcmp(key, "preview_rev") == 0) {
