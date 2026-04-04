@@ -64,7 +64,6 @@ const STEP_BASE = 16;   // step button notes 16..31
 const CC_KNOB_BASE   = 71;   // knobs 71..78
 const CC_TRACK_BASE  = 40;   // track buttons 40..43
 const CC_JOG_WHEEL   = 14;
-const CC_JOG_CLICK   = 3;
 
 // Knob → param key
 const KNOB_PARAMS = {
@@ -74,9 +73,11 @@ const KNOB_PARAMS = {
   74: 'density_snare',
   75: 'density_hat',
   76: 'randomness',
+  77: 'kick_note',
+  78: 'snare_note',
 };
 
-// Track button → focus target
+// Track button → density param
 const TRACK_FOCUS = {
   40: 'density_kick',
   41: 'density_snare',
@@ -84,12 +85,6 @@ const TRACK_FOCUS = {
   43: 'randomness',
 };
 
-const STEP_FOCUS = {
-  16: 'kick_note',
-  17: 'snare_note',
-  18: 'hat_note',
-  19: 'grid_view',
-};
 
 const PARAM_DEFAULTS = {
   map_x:         0.5,
@@ -101,12 +96,10 @@ const PARAM_DEFAULTS = {
   kick_note:     36,
   snare_note:    38,
   hat_note:      42,
-  grid_view:     0,
 };
 
 // Trigger flash duration in ticks (~44 ticks/s)
 const FLASH_TICKS = 5;
-const GRID_VIEW_STEPS = 16;
 
 // Pad glow thresholds (normalised XY distance)
 const PAD_BRIGHT_NEAR = 0.07;   // 127
@@ -125,11 +118,9 @@ const g = {
   // Per-lane trigger flash counters (counts down from FLASH_TICKS to 0)
   flash:       [0, 0, 0],   // 0=kick, 1=snare, 2=hat
 
-  // Preview grid: 3 lanes × 32 steps. 0=empty, 1=trigger, 2=accent
-  previewGrid: [new Uint8Array(32), new Uint8Array(32), new Uint8Array(32)],
-  previewRev:  -1,
-
   focused:     null,     // param key currently focused by track button / last knob
+
+  dirty:       true,     // render only when state changed
 
   // LED bookkeeping: avoid redundant writes
   padLEDCache: new Uint8Array(32),
@@ -174,47 +165,25 @@ function clampParam(key, value) {
     const rounded = Math.round(value);
     return rounded < 0 ? 0 : rounded > 127 ? 127 : rounded;
   }
-  if (key === 'grid_view') return value ? 1 : 0;
+  if (key === 'steps') {
+    const rounded = Math.round(value);
+    return rounded < 1 ? 1 : rounded > 32 ? 32 : rounded;
+  }
   return clamp01(value);
 }
 
 function formatParamValue(key, value) {
-  if (key === 'kick_note' || key === 'snare_note' || key === 'hat_note') {
+  if (key === 'kick_note' || key === 'snare_note' || key === 'hat_note' || key === 'steps') {
     return String(Math.round(value));
   }
-  if (key === 'grid_view') return String(value ? 1 : 0);
   return value.toFixed(4);
 }
 
 function paramDelta(key, delta) {
-  if (key === 'kick_note' || key === 'snare_note' || key === 'hat_note') {
+  if (key === 'kick_note' || key === 'snare_note' || key === 'hat_note' || key === 'steps') {
     return delta;
   }
   return delta * 0.005;
-}
-
-function laneCharToCell(ch) {
-  if (ch === 'A') return 2;
-  if (ch === 'X') return 1;
-  return 0;
-}
-
-function loadPreviewLane(raw, lane) {
-  const target = g.previewGrid[lane];
-  for (let i = 0; i < 32; i++) {
-    target[i] = laneCharToCell(raw && i < raw.length ? raw[i] : '.');
-  }
-}
-
-function refreshPreview(force = false) {
-  const rawRev = host_module_get_param('preview_rev');
-  const rev = rawRev !== undefined && rawRev !== null ? parseInt(rawRev, 10) : NaN;
-  if (!force && Number.isFinite(rev) && rev === g.previewRev) return;
-
-  loadPreviewLane(host_module_get_param('preview_kick') || '', 0);
-  loadPreviewLane(host_module_get_param('preview_snare') || '', 1);
-  loadPreviewLane(host_module_get_param('preview_hat') || '', 2);
-  if (Number.isFinite(rev)) g.previewRev = rev;
 }
 
 function refreshPlayhead() {
@@ -229,6 +198,7 @@ function setParam(key, value) {
   const next = clampParam(key, value);
   g.params[key] = next;
   host_module_set_param(key, formatParamValue(key, next));
+  g.dirty = true;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -278,87 +248,18 @@ function renderParams() {
   print(0, 34, `~${focC}`, 1);
   drawBar(13, 35, 111, 5, p.randomness);
 
-  /* ── Row 5: Note values ──────────────────────────────────────────── */
-  const focKN = g.focused === 'kick_note'  ? '>' : ' ';
-  const focSN = g.focused === 'snare_note' ? '>' : ' ';
-  const focHN = g.focused === 'hat_note'   ? '>' : ' ';
-  print(0, 42, `K${focKN}${p.kick_note} S${focSN}${p.snare_note} H${focHN}${p.hat_note}`, 1);
-
-  /* ── Row 6: Grid view toggle ─────────────────────────────────────── */
-  const focV = g.focused === 'grid_view' ? '>' : ' ';
-  const viewLabel = g.params.grid_view ? 'ON ' : 'OFF';
-  print(0, 54, `GRID${focV}${viewLabel}`, 1);
-}
-
-function renderGrid() {
-  /* Full-screen step grid — compact 16-step preview.
-   * 3 lanes × 16 visible steps. Display 128×64.
-   * Lane row heights: 16px each, leaving 16px for header.
-   * Each step cell uses 8 px stride → 16 steps fill the screen width.
-   * cell=0 → single dot   cell=1 → outline rect   cell=2 → filled (accent)
-   * Current step → inverted (white bg, black content). */
-
-  /* ── Header: lane labels + step counter ─────────────────────────── */
-  const stepNum = String(g.step + 1).padStart(2, '0');
-  print(0,  0, 'K', 1);
-  print(0, 18, 'S', 1);
-  print(0, 36, 'H', 1);
-  print(110, 0, stepNum, 1);
-
-  /* step separator line */
-  fill_rect(0, 14, 128, 1, 1);
-
-  const LANE_Y  = [1, 19, 37];   // top-left y of each lane row
-  const CELL_H  = 12;            // cell height (px)
-  const CELL_W  = 5;
-  const STEP_W  = 8;             // step stride
-  const X0      = 0;
-  const visibleStep = g.step % GRID_VIEW_STEPS;
-
-  for (let s = 0; s < GRID_VIEW_STEPS; s++) {
-    const sx  = X0 + s * STEP_W;
-    const cur = s === visibleStep;
-
-    if (s > 0 && s % 4 === 0) {
-      fill_rect(sx - 1, 1, 1, 48, 1);
-    }
-
-    for (let lane = 0; lane < 3; lane++) {
-      const ry   = LANE_Y[lane];
-      const cell = g.previewGrid[lane][s];
-
-      if (cur) {
-        // current step: filled column, content inverted
-        fill_rect(sx, ry, CELL_W, CELL_H, 1);
-        if (cell === 0) {
-          // empty: hollow centre
-          fill_rect(sx + 1, ry + 4, 1, 4, 0);
-        } else if (cell === 1) {
-          // trigger: inverted solid block
-          fill_rect(sx, ry + 2, CELL_W, CELL_H - 4, 0);
-        }
-        // accent (cell===2): stays fully filled
-      } else if (cell === 2) {
-        fill_rect(sx, ry + 1, CELL_W, CELL_H - 2, 1);   // accent: tall filled
-      } else if (cell === 1) {
-        fill_rect(sx, ry + 3, CELL_W, CELL_H - 6, 1);   // trigger: short filled
-      } else {
-        set_pixel(sx + 1, ry + 5, 1);                    // empty: dot
-      }
-    }
-  }
-
-  /* ── Bottom hint ─────────────────────────────────────────────────── */
-  print(0, 54, '[43: params]', 1);
+  /* ── Row 5: Note values + steps ─────────────────────────────────── */
+  const focKN  = g.focused === 'kick_note'  ? '>' : ' ';
+  const focSN  = g.focused === 'snare_note' ? '>' : ' ';
+  const focHN  = g.focused === 'hat_note'   ? '>' : ' ';
+  const focST  = g.focused === 'steps'      ? '>' : ' ';
+  print(0,  42, `K${focKN}${Math.round(p.kick_note)} S${focSN}${Math.round(p.snare_note)} H${focHN}${Math.round(p.hat_note)}`, 1);
+  print(0,  54, `STEPS${focST}${Math.round(p.steps)}`, 1);
 }
 
 function render() {
   clear_screen();
-  if (g.params.grid_view) {
-    renderGrid();
-  } else {
-    renderParams();
-  }
+  renderParams();
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -398,7 +299,6 @@ globalThis.init = function () {
       g.params[key] = parseFloat(raw);
     }
   }
-  refreshPreview(true);
   refreshPlayhead();
   g.padDirty = true;
 };
@@ -406,13 +306,19 @@ globalThis.init = function () {
 globalThis.tick = function () {
   // Age flash counters
   for (let i = 0; i < 3; i++) {
-    if (g.flash[i] > 0) g.flash[i]--;
+    if (g.flash[i] > 0) { g.flash[i]--; g.dirty = true; }
   }
 
+  const prevStep = g.step;
   refreshPlayhead();
-  refreshPreview();
+  if (g.step !== prevStep) g.dirty = true;
 
-  render();
+  // Only render when something changed — leaves screen alone otherwise
+  // so the native param browser can render and be interacted with freely.
+  if (g.dirty) {
+    render();
+    g.dirty = false;
+  }
 
   if (g.padDirty) updatePadSlice();
 };
@@ -433,44 +339,34 @@ globalThis.onMidiMessageInternal = function (data) {
   /* ── CC messages (knobs, jog, track buttons) ── */
   if (type === 0xB0) {
 
-    // Knobs 71–76 → direct param control (coarse, ±1% per click)
-    if (b1 >= 71 && b1 <= 76 && KNOB_PARAMS[b1]) {
-      const key   = KNOB_PARAMS[b1];
-      const delta = decodeDelta(b2) * 0.01;
-      setParam(key, clamp01(g.params[key] + delta));
+    // Knobs 71–78 → direct param control
+    if (b1 >= 71 && b1 <= 78 && KNOB_PARAMS[b1]) {
+      const key  = KNOB_PARAMS[b1];
+      const raw  = decodeDelta(b2);
+      // Note params step by 1; float params step ±1% per click
+      const delta = (key === 'kick_note' || key === 'snare_note') ? raw : raw * 0.01;
+      setParam(key, g.params[key] + delta);
       g.focused = key;
       if (key === 'map_x' || key === 'map_y') g.padDirty = true;
       return;
     }
 
-    // Track buttons 40–43 → focus a lane for jog-wheel control
+    // Track buttons 40–43 → focus density param directly
     if (b1 >= 40 && b1 <= 43 && b2 > 0 && TRACK_FOCUS[b1]) {
       g.focused = TRACK_FOCUS[b1];
+      g.dirty = true;
       return;
     }
 
     // Jog wheel → fine-tune focused param (±0.5% per click)
     if (b1 === CC_JOG_WHEEL && g.focused) {
-      if (g.focused === 'grid_view') {
-        setParam('grid_view', decodeDelta(b2) > 0 ? 1 : 0);
-        return;
-      }
       const delta = paramDelta(g.focused, decodeDelta(b2));
       setParam(g.focused, g.params[g.focused] + delta);
       if (g.focused === 'map_x' || g.focused === 'map_y') g.padDirty = true;
       return;
     }
 
-    // Jog click → toggle grid_view if focused, else reset param to default
-    if (b1 === CC_JOG_CLICK && b2 > 0 && g.focused) {
-      if (g.focused === 'grid_view') {
-        setParam('grid_view', g.params.grid_view ? 0 : 1);
-        return;
-      }
-      setParam(g.focused, PARAM_DEFAULTS[g.focused]);
-      if (g.focused === 'map_x' || g.focused === 'map_y') g.padDirty = true;
-      return;
-    }
+    // Jog click (CC 3) is NOT handled here — left for the native param browser
   }
 
   /* ── Pad note-on → jump map XY ── */
@@ -485,6 +381,7 @@ globalThis.onMidiMessageInternal = function (data) {
 
   if (type === 0x90 && b2 > 0 && STEP_FOCUS[b1]) {
     g.focused = STEP_FOCUS[b1];
+    g.dirty = true;
   }
 };
 

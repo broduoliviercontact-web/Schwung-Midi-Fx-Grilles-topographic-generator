@@ -64,9 +64,6 @@ typedef struct {
     /* Configurable output notes */
     uint8_t  note[GRIDS_NUM_LANES];
 
-    /* UI-only flag: stored and returned, DSP does not use it */
-    uint8_t  grid_view;
-
     /* UI preview cache: 32-step ASCII lanes, same alphabet as make test */
     char     preview[GRIDS_NUM_LANES][GRIDS_NUM_STEPS + 1];
     uint32_t preview_revision;
@@ -386,8 +383,6 @@ static void grids_set_param(void *instance, const char *key, const char *val)
         gi->note[1] = parse_note(val);
     else if (strcmp(key, "hat_note")      == 0)
         gi->note[2] = parse_note(val);
-    else if (strcmp(key, "grid_view")     == 0)
-        gi->grid_view = (atoi(val) != 0) ? 1 : 0;
 
     if (strcmp(key, "map_x") == 0 ||
         strcmp(key, "map_y") == 0 ||
@@ -406,15 +401,13 @@ static int grids_get_param(void *instance, const char *key,
     if (!gi || !key || !buf || buf_len <= 0) return -1;
 
     if (strcmp(key, "steps") == 0)
-        { snprintf(buf, buf_len, "%u", gi->step_length);    return 0; }
+        return snprintf(buf, buf_len, "%u", gi->step_length);
     if (strcmp(key, "kick_note") == 0)
-        { snprintf(buf, buf_len, "%d", gi->note[0]);        return 0; }
+        return snprintf(buf, buf_len, "%d", gi->note[0]);
     if (strcmp(key, "snare_note") == 0)
-        { snprintf(buf, buf_len, "%d", gi->note[1]);        return 0; }
+        return snprintf(buf, buf_len, "%d", gi->note[1]);
     if (strcmp(key, "hat_note") == 0)
-        { snprintf(buf, buf_len, "%d", gi->note[2]);        return 0; }
-    if (strcmp(key, "grid_view") == 0)
-        { snprintf(buf, buf_len, "%d", gi->grid_view);      return 0; }
+        return snprintf(buf, buf_len, "%d", gi->note[2]);
     if (strcmp(key, "play_step") == 0)
         return snprintf(buf, buf_len, "%u", gi->engine.step);
     if (strcmp(key, "preview_rev") == 0) {
