@@ -1,0 +1,103 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Read module identity
+        id: module
+        run: |
+          ID=$(python3 -c "import json; d=json.load(open('src/module.json')); print(d['id'])")
+          VERSION=$(python3 -c "import json; d=json.load(open('src/module.json')); print(d['version'])")
+          echo "id=${ID}" >> "$GITHUB_OUTPUT"
+          echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
+          echo "tarball=${ID}-module.tar.gz" >> "$GITHUB_OUTPUT"
+
+      - name: Build dsp.so (Docker)
+        run: ./scripts/build.sh docker
+
+      - name: Package module
+        run: |
+          chmod +x ./scripts/package.sh
+          ./scripts/package.sh
+
+      - name: Verify tarball structure
+        run: |
+          TARBALL="dist/${{ steps.module.outputs.tarball }}"
+          echo "Contents of ${TARBALL}:"
+          tar -tzf "${TARBALL}"
+          # Must begin with <id>/
+          FIRST=$(tar -tzf "${TARBALL}" | head -1)
+          if [[ "${FIRST}" != "${{ steps.module.outputs.id }}/" ]]; then
+            echo "✗ Tarball root is '${FIRST}', expected '${{ steps.module.outputs.id }}/'"; exit 1
+          fi
+
+      - name: Create GitHub Release and upload asset
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Grilles v${{ steps.module.outputs.version }}"
+          body: |
+            ## Grilles v${{ steps.module.outputs.version }}
+
+            Schwung MIDI FX module — Grids-style drum pattern sequencer for Ableton Move.
+
+            ### Install
+
+            Add to Schwung as a custom module:
+            ```
+            https://raw.githubusercontent.com/broduoliviercontact-web/Grilles-Module-for-Schwung/main/release.json
+            ```
+
+            Or install manually:
+            ```bash
+            ./scripts/build.sh
+            ./scripts/install.sh
+            ```
+          files: dist/${{ steps.module.outputs.tarball }}
+
+      - name: Update release.json on main
+        run: |
+          TAG="${GITHUB_REF_NAME}"
+          VERSION="${{ steps.module.outputs.version }}"
+          ID="${{ steps.module.outputs.id }}"
+          TARBALL="${{ steps.module.outputs.tarball }}"
+          REPO="broduoliviercontact-web/Grilles-Module-for-Schwung"
+
+          python3 - <<EOF
+          import json
+
+          data = {
+            "id": "${ID}",
+            "name": "Grilles",
+            "version": "${VERSION}",
+            "description": "Euclidean drum pattern sequencer, based on Mutable Instruments Grids",
+            "download_url": "https://github.com/${REPO}/releases/download/${TAG}/${TARBALL}",
+            "repo_url": "https://github.com/${REPO}"
+          }
+
+          with open("release.json", "w") as f:
+              json.dump(data, f, indent=2)
+              f.write("\n")
+
+          print(json.dumps(data, indent=2))
+          EOF
+
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add release.json
+          git diff --staged --quiet || git commit -m "chore: update release.json for ${TAG}"
+          git push origin HEAD:main
