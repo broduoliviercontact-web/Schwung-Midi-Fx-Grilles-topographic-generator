@@ -1,6 +1,5 @@
 # Grilles Module for Schwung
 
-French adaptation of **Grids** for **Ableton Move**, built for **Schwung**.
 
 ## Overview
 
