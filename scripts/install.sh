@@ -15,7 +15,7 @@ cd "$(dirname "$0")/.."
 
 MOVE_HOST="${1:-move.local}"
 MOVE_USER="root"
-MOVE_MODULES_DIR="/data/UserData/move-anything/modules"
+MOVE_MODULES_DIR="/data/UserData/schwung/modules"
 MODULE_CATEGORY="midi_fx"
 MODULE_ID="grids"
 DEST="${MOVE_USER}@${MOVE_HOST}:${MOVE_MODULES_DIR}/${MODULE_CATEGORY}/${MODULE_ID}"
@@ -37,6 +37,7 @@ ssh "${MOVE_USER}@${MOVE_HOST}" "mkdir -p ${MOVE_MODULES_DIR}/${MODULE_CATEGORY}
 scp src/module.json         "${DEST}/module.json"
 scp "$DSO"                  "${DEST}/dsp.so"
 scp src/ui/ui.js            "${DEST}/ui.js"
+scp src/ui/ui_chain.js      "${DEST}/ui_chain.js"
 
 # Font files must sit next to ui.js at the module root
 FONT_SRC="/data/UserData/schwung/host"

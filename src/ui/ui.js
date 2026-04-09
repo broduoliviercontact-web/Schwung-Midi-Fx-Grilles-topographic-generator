@@ -51,7 +51,9 @@
 
 import {
   decodeDelta,
-  isCapacitiveTouchMessage
+  decodeAcceleratedDelta,
+  isCapacitiveTouchMessage,
+  setLED as sharedSetLED,
 } from '/data/UserData/schwung/shared/input_filter.mjs';
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -78,11 +80,20 @@ const KNOB_PARAMS = {
 };
 
 // Track button → density param
+// Hardware: CC43 = Track1 (leftmost), CC40 = Track4 (rightmost)
+// Left-to-right layout: Kick → Snare → Hat → Chaos
 const TRACK_FOCUS = {
-  40: 'density_kick',
-  41: 'density_snare',
-  42: 'density_hat',
-  43: 'randomness',
+  43: 'density_kick',
+  42: 'density_snare',
+  41: 'density_hat',
+  40: 'randomness',
+};
+
+// Step buttons 16–18 → focus note params
+const STEP_FOCUS = {
+  16: 'kick_note',
+  17: 'snare_note',
+  18: 'hat_note',
 };
 
 
@@ -96,6 +107,9 @@ const PARAM_DEFAULTS = {
   kick_note:     36,
   snare_note:    38,
   hat_note:      42,
+  steps:         16,
+  sync:          0,    // 0 = move transport, 1 = internal
+  bpm:           120,
 };
 
 // Trigger flash duration in ticks (~44 ticks/s)
@@ -153,11 +167,9 @@ function padGlow(idx, mx, my) {
   return 0;
 }
 
-/** Send an LED message to a pad.
- *  ASSUMPTION: Move LEDs accept note-on on internal channel 1.
- *  Adjust type byte (first arg) if Move hardware differs. */
+/** Send an LED message to a pad via the shared helper (correct type byte). */
 function setLED(note, vel) {
-  move_midi_internal_send([0, 0x90, note, vel]);
+  sharedSetLED(note, vel);
 }
 
 function clampParam(key, value) {
@@ -169,18 +181,32 @@ function clampParam(key, value) {
     const rounded = Math.round(value);
     return rounded < 1 ? 1 : rounded > 32 ? 32 : rounded;
   }
+  if (key === 'sync') {
+    return Math.round(value) !== 0 ? 1 : 0;
+  }
+  if (key === 'bpm') {
+    return value < 40 ? 40 : value > 240 ? 240 : value;
+  }
   return clamp01(value);
 }
 
 function formatParamValue(key, value) {
-  if (key === 'kick_note' || key === 'snare_note' || key === 'hat_note' || key === 'steps') {
+  if (key === 'kick_note' || key === 'snare_note' || key === 'hat_note' ||
+      key === 'steps' || key === 'sync') {
     return String(Math.round(value));
+  }
+  if (key === 'bpm') {
+    return value.toFixed(1);
   }
   return value.toFixed(4);
 }
 
 function paramDelta(key, delta) {
-  if (key === 'kick_note' || key === 'snare_note' || key === 'hat_note' || key === 'steps') {
+  if (key === 'kick_note' || key === 'snare_note' || key === 'hat_note' ||
+      key === 'steps' || key === 'sync') {
+    return delta;
+  }
+  if (key === 'bpm') {
     return delta;
   }
   return delta * 0.005;
@@ -252,9 +278,12 @@ function renderParams() {
   const focKN  = g.focused === 'kick_note'  ? '>' : ' ';
   const focSN  = g.focused === 'snare_note' ? '>' : ' ';
   const focHN  = g.focused === 'hat_note'   ? '>' : ' ';
-  const focST  = g.focused === 'steps'      ? '>' : ' ';
+  const focST  = g.focused === 'steps' ? '>' : ' ';
+  const focBPM = g.focused === 'bpm'   ? '>' : ' ';
+  const syncLabel = Math.round(p.sync) === 0 ? 'MOV' : 'INT';
+  const bpmStr = Math.round(p.sync) === 1 ? ` ${focBPM}${Math.round(p.bpm)}` : '';
   print(0,  42, `K${focKN}${Math.round(p.kick_note)} S${focSN}${Math.round(p.snare_note)} H${focHN}${Math.round(p.hat_note)}`, 1);
-  print(0,  54, `STEPS${focST}${Math.round(p.steps)}`, 1);
+  print(0,  54, `ST${focST}${Math.round(p.steps)} ${syncLabel}${bpmStr}`, 1);
 }
 
 function render() {
@@ -342,9 +371,12 @@ globalThis.onMidiMessageInternal = function (data) {
     // Knobs 71–78 → direct param control
     if (b1 >= 71 && b1 <= 78 && KNOB_PARAMS[b1]) {
       const key  = KNOB_PARAMS[b1];
-      const raw  = decodeDelta(b2);
-      // Note params step by 1; float params step ±1% per click
-      const delta = (key === 'kick_note' || key === 'snare_note') ? raw : raw * 0.01;
+      const isInt = (key === 'kick_note' || key === 'snare_note' ||
+                     key === 'hat_note'  || key === 'steps' || key === 'bpm');
+      // Integer params use acceleration (faster spinning = larger steps)
+      // Float params use simple delta × 1% per click
+      const raw   = isInt ? decodeAcceleratedDelta(b2, b1) : decodeDelta(b2);
+      const delta = isInt ? raw : raw * 0.01;
       setParam(key, g.params[key] + delta);
       g.focused = key;
       if (key === 'map_x' || key === 'map_y') g.padDirty = true;
@@ -358,9 +390,13 @@ globalThis.onMidiMessageInternal = function (data) {
       return;
     }
 
-    // Jog wheel → fine-tune focused param (±0.5% per click)
+    // Jog wheel → fine-tune focused param
     if (b1 === CC_JOG_WHEEL && g.focused) {
-      const delta = paramDelta(g.focused, decodeDelta(b2));
+      const isInt = (g.focused === 'kick_note' || g.focused === 'snare_note' ||
+                     g.focused === 'hat_note'  || g.focused === 'steps' ||
+                     g.focused === 'bpm'       || g.focused === 'sync');
+      const raw   = isInt ? decodeAcceleratedDelta(b2, CC_JOG_WHEEL) : decodeDelta(b2);
+      const delta = paramDelta(g.focused, raw);
       setParam(g.focused, g.params[g.focused] + delta);
       if (g.focused === 'map_x' || g.focused === 'map_y') g.padDirty = true;
       return;

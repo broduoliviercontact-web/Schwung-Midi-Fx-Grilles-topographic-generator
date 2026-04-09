@@ -34,6 +34,13 @@ This document tracks the porting process of the Mutable Instruments Grids drum-p
 | 2026-04-01 | `src/ui/ui.js` | Added note focus/edit UI + dynamic trigger flash tracking | Complete |
 | 2026-04-02 | `src/host/` + `src/ui/ui.js` | Added cached 32-step live preview in `grid_view`, driven from current engine params | Complete |
 | 2026-04-02 | `src/host/` + `src/module.json` | Trialed standard Schwung UI preview exposure for `midi_fx`, then removed it pending a better UX direction | Complete |
+| 2026-04-09 | `src/host/grids_plugin.c` | Wire `current_bpm()` to `g_host->get_bpm()`; respect `get_clock_status()` in move-sync mode; add `sync_mode`/`internal_bpm` fields | Complete |
+| 2026-04-09 | `src/module.json` | Add `sync` (int 0–1) and `bpm` (float 40–240) to `chain_params` and `ui_hierarchy` | Complete |
+| 2026-04-09 | `src/ui/ui.js` | Define `STEP_FOCUS` constant (was undefined → ReferenceError); add `sync`/`bpm` to `PARAM_DEFAULTS`; show sync mode on display | Complete |
+| 2026-04-09 | `scripts/install.sh` | Fix install path: `move-anything/modules` → `schwung/modules` | Complete |
+| 2026-04-09 | `src/module.json`, `release.json` | Bump version to `0.2.0`; add test step to CI release workflow | Complete |
+| 2026-04-09 | `src/ui/ui.js` | Use shared `setLED` (correct type byte); fix track button mapping (CC43=leftmost); use `decodeAcceleratedDelta` for integer params | Complete |
+| 2026-04-09 | `src/ui/ui_chain.js` | Add chain UI shim (compact 6-param view for signal chain context) | Complete |
 
 ## Known Deviations from Original Grids
 

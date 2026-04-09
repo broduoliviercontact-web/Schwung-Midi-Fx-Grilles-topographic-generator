@@ -27,6 +27,14 @@ jobs:
           echo "version=${VERSION}" >> "$GITHUB_OUTPUT"
           echo "tarball=${ID}-module.tar.gz" >> "$GITHUB_OUTPUT"
 
+      - name: Install native build tools
+        run: sudo apt-get install -y gcc make
+
+      - name: Run tests
+        run: |
+          make test
+          make test-midi-fx
+
       - name: Build dsp.so (Docker)
         run: ./scripts/build.sh docker
 
@@ -54,6 +62,13 @@ jobs:
             ## Grilles v${{ steps.module.outputs.version }}
 
             Schwung MIDI FX module — Grids-style drum pattern sequencer for Ableton Move.
+
+            ### What's new in 0.2.0
+
+            - **Sync/BPM wired**: move-sync mode now queries the host BPM in real time; transport stop suppresses output
+            - **Internal BPM mode**: new `sync` and `bpm` params let the module run free of Move transport
+            - **Step button focus fixed**: step buttons 16–18 now correctly focus note params in the UI
+            - **Install path corrected**: deploys to the right Schwung modules directory
 
             ### Install
 

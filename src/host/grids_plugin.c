@@ -61,6 +61,10 @@ typedef struct {
     uint8_t  clock_running;
     uint8_t  step_length;
 
+    /* Sync mode: 0 = follow Move transport BPM, 1 = free-run internal BPM */
+    uint8_t  sync_mode;
+    float    internal_bpm;
+
     /* Configurable output notes */
     uint8_t  note[GRIDS_NUM_LANES];
 
@@ -104,9 +108,17 @@ static uint8_t parse_steps(const char *s)
     return (uint8_t)v;
 }
 
-static float current_bpm(void)
+static float current_bpm(const GridsInstance *gi)
 {
-    return DEFAULT_BPM;
+    if (!gi || gi->sync_mode == 0) {
+        /* Move transport sync: ask the host for current BPM */
+        if (g_host && g_host->get_bpm) {
+            float bpm = g_host->get_bpm();
+            if (bpm > 0.0f) return bpm;
+        }
+    }
+    /* Internal mode or host BPM unavailable: use instance BPM */
+    return (gi && gi->internal_bpm > 0.0f) ? gi->internal_bpm : DEFAULT_BPM;
 }
 
 static uint32_t frames_per_step(int sample_rate, float bpm)
@@ -285,6 +297,8 @@ static void *grids_create_instance(const char *module_dir,
     grids_set_density(&gi->engine, 2, 128);
     grids_set_randomness(&gi->engine, 0);
 
+    gi->sync_mode    = 0;           /* default: follow Move transport */
+    gi->internal_bpm = DEFAULT_BPM;
     gi->frames_until_tick = frames_per_step(44100, DEFAULT_BPM);
     gi->clock_running = 1;
     gi->step_length = DEFAULT_STEP_LENGTH;
@@ -312,7 +326,8 @@ static int grids_process_midi(void *instance,
 
     if (in_msg[0] == 0xFA) {
         grids_engine_reset(&gi->engine);
-        gi->frames_until_tick = frames_per_step(44100, current_bpm());
+        gi->frames_until_tick = frames_per_step(
+            g_host ? g_host->sample_rate : 44100, current_bpm(gi));
         gi->clock_running = 1;
         return flush_all_notes(gi, out_msgs, out_lens, max_out, 0);
     }
@@ -335,7 +350,7 @@ static int grids_plugin_tick(void *instance,
     GridsInstance *gi = (GridsInstance *)instance;
     if (!gi) return 0;
 
-    float bpm = current_bpm();
+    float bpm = current_bpm(gi);
     uint32_t fps = frames_per_step(sample_rate, bpm);
     uint32_t gate = frames_per_gate(sample_rate, bpm);
     uint32_t nf = (uint32_t)frames;
@@ -343,6 +358,11 @@ static int grids_plugin_tick(void *instance,
     if (count >= max_out) return count;
 
     if (!gi->clock_running) return count;
+
+    /* In move-sync mode, respect the host transport state directly */
+    if (gi->sync_mode == 0 && g_host && g_host->get_clock_status) {
+        if (g_host->get_clock_status() != MOVE_CLOCK_STATUS_RUNNING) return count;
+    }
 
     if (gi->frames_until_tick <= nf) {
         uint32_t carry = nf - gi->frames_until_tick;
@@ -383,6 +403,14 @@ static void grids_set_param(void *instance, const char *key, const char *val)
         gi->note[1] = parse_note(val);
     else if (strcmp(key, "hat_note")      == 0)
         gi->note[2] = parse_note(val);
+    else if (strcmp(key, "sync")          == 0)
+        gi->sync_mode = (atoi(val) != 0) ? 1u : 0u;
+    else if (strcmp(key, "bpm")           == 0) {
+        float v = (float)atof(val);
+        if (v < 40.0f)  v = 40.0f;
+        if (v > 240.0f) v = 240.0f;
+        gi->internal_bpm = v;
+    }
 
     if (strcmp(key, "map_x") == 0 ||
         strcmp(key, "map_y") == 0 ||
@@ -408,6 +436,10 @@ static int grids_get_param(void *instance, const char *key,
         return snprintf(buf, buf_len, "%d", gi->note[1]);
     if (strcmp(key, "hat_note") == 0)
         return snprintf(buf, buf_len, "%d", gi->note[2]);
+    if (strcmp(key, "sync") == 0)
+        return snprintf(buf, buf_len, "%d", gi->sync_mode);
+    if (strcmp(key, "bpm") == 0)
+        return snprintf(buf, buf_len, "%.1f", gi->internal_bpm);
     if (strcmp(key, "play_step") == 0)
         return snprintf(buf, buf_len, "%u", gi->engine.step);
     if (strcmp(key, "preview_rev") == 0) {

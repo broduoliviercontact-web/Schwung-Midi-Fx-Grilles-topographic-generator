@@ -24,6 +24,7 @@ echo "→ Packaging ${ID} v${VERSION}"
 
 DSO="build/aarch64/dsp.so"
 UI="src/ui/ui.js"
+UI_CHAIN="src/ui/ui_chain.js"
 DIST="dist"
 STAGE="${DIST}/${ID}"
 
@@ -38,6 +39,11 @@ if [ ! -f "${UI}" ]; then
     exit 1
 fi
 
+if [ ! -f "${UI_CHAIN}" ]; then
+    echo "✗ ${UI_CHAIN} not found."
+    exit 1
+fi
+
 # Stage
 rm -rf "${STAGE}"
 mkdir -p "${STAGE}"
@@ -45,6 +51,7 @@ mkdir -p "${STAGE}"
 cp "${MODULE_JSON}"  "${STAGE}/module.json"
 cp "${DSO}"          "${STAGE}/dsp.so"
 cp "${UI}"           "${STAGE}/ui.js"
+cp "${UI_CHAIN}"     "${STAGE}/ui_chain.js"
 
 # Pack — always under <id>/ at tarball root
 TARBALL="${DIST}/${ID}-module.tar.gz"
