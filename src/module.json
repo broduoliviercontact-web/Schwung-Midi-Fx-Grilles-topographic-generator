@@ -2,7 +2,7 @@
     "id": "grids",
     "name": "Grilles",
     "abbrev": "GR",
-    "version": "0.2.0",
+    "version": "0.2.1",
     "description": "Euclidean drum pattern sequencer, based on Mutable Instruments Grids",
     "author": "Mutable Instruments (port: move-grids)",
     "license": "MIT",

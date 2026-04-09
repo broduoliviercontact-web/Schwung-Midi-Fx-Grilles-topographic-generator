@@ -52,6 +52,9 @@ const PARAM_DEFAULTS = {
   density_snare: 0.5,
   density_hat:   0.5,
   randomness:    0.0,
+  kick_note:     36,
+  snare_note:    38,
+  hat_note:      42,
 };
 
 const FLASH_TICKS = 5;

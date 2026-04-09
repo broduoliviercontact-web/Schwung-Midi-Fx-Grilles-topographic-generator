@@ -64,6 +64,7 @@ typedef struct {
     /* Sync mode: 0 = follow Move transport BPM, 1 = free-run internal BPM */
     uint8_t  sync_mode;
     float    internal_bpm;
+    uint8_t  prev_clock_running;  /* tracks STOPPED→RUNNING transition    */
 
     /* Configurable output notes */
     uint8_t  note[GRIDS_NUM_LANES];
@@ -339,6 +340,15 @@ static int grids_process_midi(void *instance,
         gi->clock_running = 0;
         return flush_all_notes(gi, out_msgs, out_lens, max_out, 0);
     }
+
+    /* Pass through all non-transport MIDI messages to downstream */
+    if (in_len >= 3 && in_msg[0] < 0xF0 && max_out > 0) {
+        out_msgs[0][0] = in_msg[0];
+        out_msgs[0][1] = in_msg[1];
+        out_msgs[0][2] = in_msg[2];
+        out_lens[0] = 3;
+        return 1;
+    }
     return 0;
 }
 
@@ -359,9 +369,19 @@ static int grids_plugin_tick(void *instance,
 
     if (!gi->clock_running) return count;
 
-    /* In move-sync mode, respect the host transport state directly */
+    /* In move-sync mode, respect the host transport state directly.
+     * On STOPPED→RUNNING transition, reset the step timer so the first
+     * step fires at a clean interval rather than a random carry-over. */
     if (gi->sync_mode == 0 && g_host && g_host->get_clock_status) {
-        if (g_host->get_clock_status() != MOVE_CLOCK_STATUS_RUNNING) return count;
+        int cs = g_host->get_clock_status();
+        if (cs != MOVE_CLOCK_STATUS_RUNNING) {
+            gi->prev_clock_running = 0;
+            return count;
+        }
+        if (!gi->prev_clock_running) {
+            gi->frames_until_tick = fps;   /* fresh interval on resume */
+        }
+        gi->prev_clock_running = 1;
     }
 
     if (gi->frames_until_tick <= nf) {
