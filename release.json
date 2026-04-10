@@ -3,6 +3,6 @@
   "name": "Grilles",
   "description": "Euclidean drum pattern sequencer, based on Mutable Instruments Grids",
   "component_type": "midi_fx",
-  "version": "0.2.1",
-  "download_url": "https://github.com/broduoliviercontact-web/Schwung-Midi-Fx-Grilles-topographic-generator/releases/download/v0.2.1/grids-module.tar.gz"
+  "version": "0.2.2",
+  "download_url": "https://github.com/broduoliviercontact-web/Schwung-Midi-Fx-Grilles-topographic-generator/releases/download/v0.2.2/grids-module.tar.gz"
 }

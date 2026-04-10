@@ -1,50 +1,22 @@
 /**
- * ui.js — Grids Move UI
+ * ui.js — Grilles Move UI
  *
- * Single performance page. No menu depth.
+ * Two pages, jog wheel navigation, click-to-edit.
  *
- * ── Hardware mapping ─────────────────────────────────────────────────────
+ * ── Pages ────────────────────────────────────────────────────────────────────
+ *  PAGE_MAIN  (0): map_x, map_y, density_kick, density_snare, density_hat, randomness
+ *  PAGE_PARAMS(1): kick_note, snare_note, hat_note, steps, sync, bpm
  *
- *  KNOBS (CCs 71-76, relative)
- *    71 → map_x        72 → map_y
- *    73 → density_kick  74 → density_snare
- *    75 → density_hat   76 → randomness
+ * ── Jog navigation ───────────────────────────────────────────────────────────
+ *  Jog turn (not editing) → move cursor between params (wraps pages)
+ *  Jog click              → toggle edit mode on focused param
+ *  Jog turn (editing)     → change focused param value
  *
- *  PADS (notes 68-99, 4 rows × 8 cols)
- *    32 pads act as a 2-D XY map navigator.
- *    Col 0-7 = X: 0.0 → 1.0 (left → right)
- *    Row 0-3 = Y: 0.0 → 1.0 (bottom → top)
- *    Nearest active pad is lit bright; adjacents fade by distance.
- *
- *  TRACK BUTTONS (CCs 40-43)
- *    40 → focus density_kick   41 → focus density_snare
- *    42 → focus density_hat    43 → focus randomness
- *    Focused param: jog wheel fine-tunes it; highlighted on display.
- *
- *  STEP BUTTONS (notes 16-18)
- *    16 → focus kick_note   17 → focus snare_note   18 → focus hat_note
- *    Use jog wheel to change the selected note by semitone.
- *
- *  JOG WHEEL (CC 14 relative)
- *    Fine-tunes focused param (±0.005 per click).
- *
- *  JOG CLICK (CC 3)
- *    Reset focused param to its default value.
- *
- * ── Display layout (128×64 monochrome) ───────────────────────────────────
- *
- *  y= 0 h= 8  Title row:  GRIDS  K● S  H●  07
- *  y=10 h= 7  X bar:      [████████████████░░░░]  (full width minus label)
- *  y=18 h= 7  Y bar:      [████████░░░░░░░░░░░░]
- *  y=26 h= 7  Density row: K[████]  S[██░░]  H[████░]
- *  y=34 h= 7  Chaos row:   ~[██░░░░░░░░░░░░░░░░]
- *  y=44 h=20  Step runner: 32 columns × 4 px, current step = filled column,
- *                          rest = tick mark; K/S/H trigger lights at step.
- *
- * ── LED budget ───────────────────────────────────────────────────────────
- *  Normal tick:  ≤ 8 LED writes (pad XY proximity diff, spread over 4 ticks)
- *  Trigger tick: 3 extra writes (trigger flash on pads, auto-fades)
- *  Full pad redraw (on XY param change): 32 writes spread over 4 ticks = 8/tick
+ * ── Hardware shortcuts ───────────────────────────────────────────────────────
+ *  KNOBS 71-76 → direct param control (always work, auto-focus)
+ *  TRACK 40-43 → direct focus density params
+ *  STEP  16-18 → direct focus note params (jumps to PAGE_PARAMS)
+ *  PADS  68-99 → set map XY position (PAGE_MAIN only)
  */
 
 'use strict';
@@ -52,7 +24,6 @@
 import {
   decodeDelta,
   decodeAcceleratedDelta,
-  isCapacitiveTouchMessage,
   setLED as sharedSetLED,
 } from '/data/UserData/schwung/shared/input_filter.mjs';
 
@@ -60,14 +31,24 @@ import {
  * Constants
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-const PAD_BASE  = 68;   // pad notes 68..99
-const STEP_BASE = 16;   // step button notes 16..31
+const PAD_BASE  = 68;
+const STEP_BASE = 16;
 
-const CC_KNOB_BASE   = 71;   // knobs 71..78
-const CC_TRACK_BASE  = 40;   // track buttons 40..43
-const CC_JOG_WHEEL   = 14;
+const CC_JOG_WHEEL  = 14;
+const CC_JOG_CLICK  = 3;
+const CC_KNOB_BASE  = 71;
+const CC_TRACK_BASE = 40;
 
-// Knob → param key
+const PAGE_MAIN   = 0;
+const PAGE_PARAMS = 1;
+
+const FLASH_TICKS = 5;
+
+const PAD_BRIGHT_NEAR = 0.07;
+const PAD_BRIGHT_MED  = 0.22;
+const PAD_BRIGHT_FAR  = 0.45;
+
+// Knob → param key (apply on both pages)
 const KNOB_PARAMS = {
   71: 'map_x',
   72: 'map_y',
@@ -75,13 +56,9 @@ const KNOB_PARAMS = {
   74: 'density_snare',
   75: 'density_hat',
   76: 'randomness',
-  77: 'kick_note',
-  78: 'snare_note',
 };
 
-// Track button → density param
-// Hardware: CC43 = Track1 (leftmost), CC40 = Track4 (rightmost)
-// Left-to-right layout: Kick → Snare → Hat → Chaos
+// Track button → density param (direct focus)
 const TRACK_FOCUS = {
   43: 'density_kick',
   42: 'density_snare',
@@ -89,13 +66,15 @@ const TRACK_FOCUS = {
   40: 'randomness',
 };
 
-// Step buttons 16–18 → focus note params
+// Step button → note param (direct focus, jumps to PAGE_PARAMS)
 const STEP_FOCUS = {
   16: 'kick_note',
   17: 'snare_note',
   18: 'hat_note',
 };
 
+const MAIN_PARAM_LIST   = ['map_x', 'map_y', 'density_kick', 'density_snare', 'density_hat', 'randomness'];
+const PARAMS_PARAM_LIST = ['kick_note', 'snare_note', 'hat_note', 'steps', 'sync', 'bpm'];
 
 const PARAM_DEFAULTS = {
   map_x:         0.5,
@@ -108,56 +87,112 @@ const PARAM_DEFAULTS = {
   snare_note:    38,
   hat_note:      42,
   steps:         16,
-  sync:          0,    // 0 = move transport, 1 = internal
+  sync:          0,
   bpm:           120,
 };
 
-// Trigger flash duration in ticks (~44 ticks/s)
-const FLASH_TICKS = 5;
-
-// Pad glow thresholds (normalised XY distance)
-const PAD_BRIGHT_NEAR = 0.07;   // 127
-const PAD_BRIGHT_MED  = 0.22;   // 50
-const PAD_BRIGHT_FAR  = 0.45;   // 12
-
 /* ═══════════════════════════════════════════════════════════════════════════
- * Module state  (pure data, no DOM)
+ * State
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 const g = {
-  params: { ...PARAM_DEFAULTS },
-
-  step:        0,        // 0..31 (read back from DSP host)
-
-  // Per-lane trigger flash counters (counts down from FLASH_TICKS to 0)
-  flash:       [0, 0, 0],   // 0=kick, 1=snare, 2=hat
-
-  focused:     null,     // param key currently focused by track button / last knob
-
-  dirty:       true,     // render only when state changed
-
-  // LED bookkeeping: avoid redundant writes
-  padLEDCache: new Uint8Array(32),
-  padDirty:    true,     // set true → spread 32 updates over 4 ticks
-  padDirtyPhase: 0,      // 0..3, which 8-pad slice to update this tick
+  params:       { ...PARAM_DEFAULTS },
+  page:         PAGE_MAIN,
+  focused:      null,
+  editing:      false,
+  step:         0,
+  flash:        [0, 0, 0],
+  padLEDCache:  new Uint8Array(32),
+  padDirty:     true,
+  padDirtyPhase: 0,
 };
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * Helpers
+ * Param helpers
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-/** Clamp a value to [0, 1] */
-function clamp01(v) {
-  return v < 0 ? 0 : v > 1 ? 1 : v;
+function isIntParam(key) {
+  return key === 'kick_note' || key === 'snare_note' || key === 'hat_note' ||
+         key === 'steps' || key === 'bpm';
 }
 
-/** Pad index → normalised { x, y }.
- *  Row 0 = bottom of device = Y=0; row 3 = top = Y=1. */
+function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
+
+function clampParam(key, value) {
+  if (key === 'kick_note' || key === 'snare_note' || key === 'hat_note') {
+    const n = Math.round(value);
+    return n < 0 ? 0 : n > 127 ? 127 : n;
+  }
+  if (key === 'steps') {
+    const n = Math.round(value);
+    return n < 1 ? 1 : n > 32 ? 32 : n;
+  }
+  if (key === 'bpm') {
+    const n = Math.round(value);
+    return n < 40 ? 40 : n > 240 ? 240 : n;
+  }
+  if (key === 'sync') return Math.round(value) !== 0 ? 1 : 0;
+  return clamp01(value);
+}
+
+function formatParamValue(key, value) {
+  if (isIntParam(key) || key === 'sync') return String(Math.round(value));
+  return value.toFixed(4);
+}
+
+function paramDelta(key, delta) {
+  if (isIntParam(key) || key === 'sync') return delta > 0 ? 1 : -1;
+  return delta * 0.005;
+}
+
+function knobDelta(key, delta) {
+  if (isIntParam(key)) return decodeAcceleratedDelta !== undefined
+    ? delta : (delta > 0 ? 1 : -1);
+  return delta * 0.01;
+}
+
+function setParam(key, value) {
+  const next = clampParam(key, value);
+  g.params[key] = next;
+  host_module_set_param(key, formatParamValue(key, next));
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Page / cursor navigation
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+function currentParamList() {
+  return g.page === PAGE_PARAMS ? PARAMS_PARAM_LIST : MAIN_PARAM_LIST;
+}
+
+function moveCursor(delta) {
+  const list = currentParamList();
+  const idx  = list.indexOf(g.focused);
+  const raw  = idx < 0 ? 0 : idx + delta;
+
+  if (raw < 0) {
+    // début de liste → page précédente, dernier param
+    g.page    = PAGE_MAIN;
+    g.focused = MAIN_PARAM_LIST[MAIN_PARAM_LIST.length - 1];
+    g.editing = false;
+  } else if (raw >= list.length) {
+    // fin de liste → page suivante, premier param
+    g.page    = PAGE_PARAMS;
+    g.focused = PARAMS_PARAM_LIST[0];
+    g.editing = false;
+  } else {
+    g.focused = list[raw];
+  }
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Pad LED management
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
 function padIndexToXY(idx) {
   return { x: (idx % 8) / 7, y: Math.floor(idx / 8) / 3 };
 }
 
-/** Target brightness for a pad given current map XY position. */
 function padGlow(idx, mx, my) {
   const { x, y } = padIndexToXY(idx);
   const d = Math.sqrt((x - mx) ** 2 + (y - my) ** 2);
@@ -167,141 +202,11 @@ function padGlow(idx, mx, my) {
   return 0;
 }
 
-/** Send an LED message to a pad via the shared helper (correct type byte). */
-function setLED(note, vel) {
-  sharedSetLED(note, vel);
-}
+function setLED(note, vel) { sharedSetLED(note, vel); }
 
-function clampParam(key, value) {
-  if (key === 'kick_note' || key === 'snare_note' || key === 'hat_note') {
-    const rounded = Math.round(value);
-    return rounded < 0 ? 0 : rounded > 127 ? 127 : rounded;
-  }
-  if (key === 'steps') {
-    const rounded = Math.round(value);
-    return rounded < 1 ? 1 : rounded > 32 ? 32 : rounded;
-  }
-  if (key === 'sync') {
-    return Math.round(value) !== 0 ? 1 : 0;
-  }
-  if (key === 'bpm') {
-    return value < 40 ? 40 : value > 240 ? 240 : value;
-  }
-  return clamp01(value);
-}
-
-function formatParamValue(key, value) {
-  if (key === 'kick_note' || key === 'snare_note' || key === 'hat_note' ||
-      key === 'steps' || key === 'sync') {
-    return String(Math.round(value));
-  }
-  if (key === 'bpm') {
-    return value.toFixed(1);
-  }
-  return value.toFixed(4);
-}
-
-function paramDelta(key, delta) {
-  if (key === 'kick_note' || key === 'snare_note' || key === 'hat_note' ||
-      key === 'steps' || key === 'sync') {
-    return delta;
-  }
-  if (key === 'bpm') {
-    return delta;
-  }
-  return delta * 0.005;
-}
-
-function refreshPlayhead() {
-  const raw = host_module_get_param('play_step');
-  if (raw === undefined || raw === null) return;
-  const step = parseInt(raw, 10);
-  if (Number.isFinite(step)) g.step = step & 31;
-}
-
-/** Write a single param value to the DSP. */
-function setParam(key, value) {
-  const next = clampParam(key, value);
-  g.params[key] = next;
-  host_module_set_param(key, formatParamValue(key, next));
-  g.dirty = true;
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
- * Display rendering
- * All pixel coords assume 128×64, 5×7 font (≈6 px/char).
- * ═══════════════════════════════════════════════════════════════════════════ */
-
-/** Draw a pixel-based bar at (bx, by) with total inner width bw. */
-function drawBar(bx, by, bw, bh, value) {
-  const filled = Math.round(clamp01(value) * bw);
-  draw_rect(bx - 1, by - 1, bw + 2, bh + 2, 1);  // outline
-  if (filled > 0) fill_rect(bx, by, filled, bh, 1);
-  if (filled < bw) fill_rect(bx + filled, by, bw - filled, bh, 0);
-}
-
-function renderParams() {
-  const p = g.params;
-
-  /* ── Row 0: title + trigger indicators + step number ─────────────── */
-  const kDot = g.flash[0] > 0 ? '*' : '.';
-  const sDot = g.flash[1] > 0 ? '*' : '.';
-  const hDot = g.flash[2] > 0 ? '*' : '.';
-  const stepNum = String(g.step + 1).padStart(2, '0');
-  print(0,  0, 'GRIDS', 1);
-  print(44, 0, `K${kDot}S${sDot}H${hDot}`, 1);
-  print(104, 0, stepNum, 1);
-
-  /* ── Row 1: Map X bar ────────────────────────────────────────────── */
-  print(0, 10, 'X', 1);
-  drawBar(10, 11, 114, 5, p.map_x);
-
-  /* ── Row 2: Map Y bar ────────────────────────────────────────────── */
-  print(0, 18, 'Y', 1);
-  drawBar(10, 19, 114, 5, p.map_y);
-
-  /* ── Row 3: Density bars ─────────────────────────────────────────── */
-  const dw = 32;
-  const focK = g.focused === 'density_kick'  ? '>' : ' ';
-  const focS = g.focused === 'density_snare' ? '>' : ' ';
-  const focH = g.focused === 'density_hat'   ? '>' : ' ';
-  print(0,  26, `K${focK}`, 1);  drawBar(13, 27, dw, 5, p.density_kick);
-  print(48, 26, `S${focS}`, 1);  drawBar(61, 27, dw, 5, p.density_snare);
-  print(96, 26, `H${focH}`, 1);  drawBar(109, 27, dw - 15, 5, p.density_hat);
-
-  /* ── Row 4: Chaos bar ────────────────────────────────────────────── */
-  const focC = g.focused === 'randomness' ? '>' : ' ';
-  print(0, 34, `~${focC}`, 1);
-  drawBar(13, 35, 111, 5, p.randomness);
-
-  /* ── Row 5: Note values + steps ─────────────────────────────────── */
-  const focKN  = g.focused === 'kick_note'  ? '>' : ' ';
-  const focSN  = g.focused === 'snare_note' ? '>' : ' ';
-  const focHN  = g.focused === 'hat_note'   ? '>' : ' ';
-  const focST  = g.focused === 'steps' ? '>' : ' ';
-  const focBPM = g.focused === 'bpm'   ? '>' : ' ';
-  const syncLabel = Math.round(p.sync) === 0 ? 'MOV' : 'INT';
-  const bpmStr = Math.round(p.sync) === 1 ? ` ${focBPM}${Math.round(p.bpm)}` : '';
-  print(0,  42, `K${focKN}${Math.round(p.kick_note)} S${focSN}${Math.round(p.snare_note)} H${focHN}${Math.round(p.hat_note)}`, 1);
-  print(0,  54, `ST${focST}${Math.round(p.steps)} ${syncLabel}${bpmStr}`, 1);
-}
-
-function render() {
-  clear_screen();
-  renderParams();
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
- * Pad LED management (spread updates to stay under 60/frame)
- * ═══════════════════════════════════════════════════════════════════════════ */
-
-/**
- * Refresh 8 pad LEDs (one phase of 4) per call.
- * Full pad redraw completes in 4 consecutive ticks = ≤8 writes/tick.
- */
 function updatePadSlice() {
-  const mx = g.params.map_x;
-  const my = g.params.map_y;
+  const mx   = g.params.map_x;
+  const my   = g.params.map_y;
   const base = g.padDirtyPhase * 8;
 
   for (let i = base; i < base + 8; i++) {
@@ -317,11 +222,108 @@ function updatePadSlice() {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * Schwung lifecycle
+ * Rendering
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+function drawBar(bx, by, bw, bh, value) {
+  const filled = Math.round(clamp01(value) * bw);
+  draw_rect(bx - 1, by - 1, bw + 2, bh + 2, 1);
+  if (filled > 0)  fill_rect(bx, by, filled, bh, 1);
+  if (filled < bw) fill_rect(bx + filled, by, bw - filled, bh, 0);
+}
+
+function foc(key) { return g.focused === key ? (g.editing ? '[' : '>') : ' '; }
+
+function renderMainPage() {
+  const p = g.params;
+  const kDot   = g.flash[0] > 0 ? '*' : '.';
+  const sDot   = g.flash[1] > 0 ? '*' : '.';
+  const hDot   = g.flash[2] > 0 ? '*' : '.';
+  const stepNum = String(g.step + 1).padStart(2, '0');
+
+  // Header
+  print(0,   0, 'GRIDS', 1);
+  print(44,  0, `K${kDot}S${sDot}H${hDot}`, 1);
+  print(104, 0, stepNum, 1);
+
+  // Map X/Y bars
+  print(0, 10, `X${foc('map_x')}`, 1);
+  drawBar(16, 11, 108, 5, p.map_x);
+
+  print(0, 18, `Y${foc('map_y')}`, 1);
+  drawBar(16, 19, 108, 5, p.map_y);
+
+  // Density bars
+  print(0,  26, `K${foc('density_kick')}`,  1); drawBar(16, 27, 26, 5, p.density_kick);
+  print(45, 26, `S${foc('density_snare')}`, 1); drawBar(61, 27, 26, 5, p.density_snare);
+  print(90, 26, `H${foc('density_hat')}`,   1); drawBar(106, 27, 18, 5, p.density_hat);
+
+  // Chaos bar
+  print(0, 34, `~${foc('randomness')}`, 1);
+  drawBar(16, 35, 108, 5, p.randomness);
+
+  // Footer: focused param or page hint
+  if (g.focused && MAIN_PARAM_LIST.includes(g.focused)) {
+    const val = isIntParam(g.focused)
+      ? Math.round(p[g.focused])
+      : p[g.focused].toFixed(3);
+    print(0, 54, `${g.editing ? '[' : '>'}${g.focused}: ${val}`, 1);
+  } else {
+    print(0, 54, 'JOG:nav CLICK:edit P2>', 1);
+  }
+}
+
+function renderParamsPage() {
+  const p = g.params;
+  const syncStr = Math.round(p.sync) === 0 ? 'MOV' : 'INT';
+
+  // Header
+  print(0, 0, 'GRIDS PARAMS', 1);
+
+  // Notes row
+  print(0,  10, `K${foc('kick_note')}${Math.round(p.kick_note)}`, 1);
+  print(44, 10, `S${foc('snare_note')}${Math.round(p.snare_note)}`, 1);
+  print(88, 10, `H${foc('hat_note')}${Math.round(p.hat_note)}`, 1);
+
+  // Steps
+  print(0, 24, `STEPS${foc('steps')}${Math.round(p.steps)}`, 1);
+
+  // Sync + BPM
+  print(0,  38, `SYNC${foc('sync')}${syncStr}`, 1);
+  print(64, 38, `BPM${foc('bpm')}${Math.round(p.bpm)}`, 1);
+
+  // Footer
+  if (g.focused && PARAMS_PARAM_LIST.includes(g.focused)) {
+    const val = isIntParam(g.focused)
+      ? Math.round(p[g.focused])
+      : p[g.focused].toFixed(3);
+    print(0, 54, `${g.editing ? '[' : '>'}${g.focused}: ${val}`, 1);
+  } else {
+    print(0, 54, '<P1 JOG:nav CLICK:edit', 1);
+  }
+}
+
+function render() {
+  clear_screen();
+  if (g.page === PAGE_PARAMS) {
+    renderParamsPage();
+  } else {
+    renderMainPage();
+  }
+}
+
+function refreshPlayhead() {
+  const raw = host_module_get_param('play_step');
+  if (raw === undefined || raw === null) return;
+  const step = parseInt(raw, 10);
+  if (Number.isFinite(step)) g.step = step & 31;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Lifecycle
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 globalThis.init = function () {
-  // Pull current param values from DSP
   for (const key of Object.keys(PARAM_DEFAULTS)) {
     const raw = host_module_get_param(key);
     if (raw !== undefined && raw !== null) {
@@ -333,121 +335,109 @@ globalThis.init = function () {
 };
 
 globalThis.tick = function () {
-  // Age flash counters
   for (let i = 0; i < 3; i++) {
-    if (g.flash[i] > 0) { g.flash[i]--; g.dirty = true; }
+    if (g.flash[i] > 0) g.flash[i]--;
   }
-
-  const prevStep = g.step;
   refreshPlayhead();
-  if (g.step !== prevStep) g.dirty = true;
-
-  // Only render when something changed — leaves screen alone otherwise
-  // so the native param browser can render and be interacted with freely.
-  if (g.dirty) {
-    render();
-    g.dirty = false;
-  }
-
+  render();
   if (g.padDirty) updatePadSlice();
 };
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * Internal MIDI — hardware inputs (knobs, pads, jog, track buttons)
+ * Internal MIDI
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 globalThis.onMidiMessageInternal = function (data) {
   if (!data || data.length < 3) return;
-  if (isCapacitiveTouchMessage(data)) return;
+  // Filter capacitive touch notes (note-on, notes 0-9) — NOT CC messages
+  if (data[0] === 0x90 && data[1] < 10) return;
 
   const status = data[0];
   const b1     = data[1];
   const b2     = data.length > 2 ? data[2] : 0;
   const type   = status & 0xF0;
 
-  /* ── CC messages (knobs, jog, track buttons) ── */
   if (type === 0xB0) {
-
-    // Knobs 71–78 → direct param control
-    if (b1 >= 71 && b1 <= 78 && KNOB_PARAMS[b1]) {
-      const key  = KNOB_PARAMS[b1];
-      const isInt = (key === 'kick_note' || key === 'snare_note' ||
-                     key === 'hat_note'  || key === 'steps' || key === 'bpm');
-      // Integer params use acceleration (faster spinning = larger steps)
-      // Float params use simple delta × 1% per click
-      const raw   = isInt ? decodeAcceleratedDelta(b2, b1) : decodeDelta(b2);
-      const delta = isInt ? raw : raw * 0.01;
-      setParam(key, g.params[key] + delta);
+    // Knobs 71-76: direct param control
+    if (b1 >= 71 && b1 <= 76 && KNOB_PARAMS[b1]) {
+      const key   = KNOB_PARAMS[b1];
+      const delta = isIntParam(key)
+        ? decodeAcceleratedDelta(b2, b1)
+        : decodeDelta(b2);
+      setParam(key, g.params[key] + knobDelta(key, delta));
       g.focused = key;
+      g.editing = true;
       if (key === 'map_x' || key === 'map_y') g.padDirty = true;
+      // Switch to correct page for knob param
+      g.page = MAIN_PARAM_LIST.includes(key) ? PAGE_MAIN : PAGE_PARAMS;
       return;
     }
 
-    // Track buttons 40–43 → focus density param directly
+    // Track buttons 40-43: direct focus density param
     if (b1 >= 40 && b1 <= 43 && b2 > 0 && TRACK_FOCUS[b1]) {
       g.focused = TRACK_FOCUS[b1];
-      g.dirty = true;
+      g.editing = false;
+      g.page    = PAGE_MAIN;
       return;
     }
 
-    // Jog wheel → fine-tune focused param
-    if (b1 === CC_JOG_WHEEL && g.focused) {
-      const isInt = (g.focused === 'kick_note' || g.focused === 'snare_note' ||
-                     g.focused === 'hat_note'  || g.focused === 'steps' ||
-                     g.focused === 'bpm'       || g.focused === 'sync');
-      const raw   = isInt ? decodeAcceleratedDelta(b2, CC_JOG_WHEEL) : decodeDelta(b2);
-      const delta = paramDelta(g.focused, raw);
-      setParam(g.focused, g.params[g.focused] + delta);
-      if (g.focused === 'map_x' || g.focused === 'map_y') g.padDirty = true;
+    // Jog wheel
+    if (b1 === CC_JOG_WHEEL) {
+      const d = decodeDelta(b2);
+      if (g.editing && g.focused) {
+        setParam(g.focused, g.params[g.focused] + paramDelta(g.focused, d));
+        if (g.focused === 'map_x' || g.focused === 'map_y') g.padDirty = true;
+      } else {
+        moveCursor(d > 0 ? 1 : -1);
+      }
       return;
     }
 
-    // Jog click (CC 3) is NOT handled here — left for the native param browser
+    // Jog click: toggle edit mode
+    if (b1 === CC_JOG_CLICK && b2 > 0) {
+      if (!g.focused) {
+        g.focused = currentParamList()[0];
+        g.editing = false;
+      } else {
+        g.editing = !g.editing;
+      }
+      return;
+    }
   }
 
-  /* ── Pad note-on → jump map XY ── */
-  if (type === 0x90 && b1 >= PAD_BASE && b1 < PAD_BASE + 32 && b2 > 0) {
-    const idx    = b1 - PAD_BASE;
-    const { x, y } = padIndexToXY(idx);
-    setParam('map_x', x);
-    setParam('map_y', y);
-    g.padDirty = true;
-    return;
-  }
+  if (type === 0x90 && b2 > 0) {
+    // Step buttons 16-18: focus note param on PAGE_PARAMS
+    if (b1 >= STEP_BASE && b1 <= STEP_BASE + 2 && STEP_FOCUS[b1]) {
+      g.focused = STEP_FOCUS[b1];
+      g.editing = false;
+      g.page    = PAGE_PARAMS;
+      return;
+    }
 
-  if (type === 0x90 && b2 > 0 && STEP_FOCUS[b1]) {
-    g.focused = STEP_FOCUS[b1];
-    g.dirty = true;
+    // Pads: set map XY (always, any page)
+    if (b1 >= PAD_BASE && b1 < PAD_BASE + 32) {
+      const idx = b1 - PAD_BASE;
+      const { x, y } = padIndexToXY(idx);
+      setParam('map_x', x);
+      setParam('map_y', y);
+      g.padDirty = true;
+    }
   }
 };
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * External MIDI — DSP trigger output + optional MIDI clock
+ * External MIDI — trigger flash from DSP output
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 globalThis.onMidiMessageExternal = function (data) {
   if (!data || data.length < 2) return;
-
   const status = data[0];
   const b1     = data[1];
   const b2     = data.length > 2 ? data[2] : 0;
 
-  // DSP sends note-on on channel 1 (0x90) for triggers
-  // velocity 127 = accent, 80 = normal
   if (status === 0x90 && b2 > 0) {
     if (b1 === g.params.kick_note)  g.flash[0] = FLASH_TICKS;
     if (b1 === g.params.snare_note) g.flash[1] = FLASH_TICKS;
     if (b1 === g.params.hat_note)   g.flash[2] = FLASH_TICKS;
-    return;
-  }
-
-  // MIDI clock (0xF8) — sync step counter to external tempo
-  if (status === 0xF8) {
-    return;
-  }
-
-  // MIDI Start (0xFA) — reset step
-  if (status === 0xFA) {
-    return;
   }
 };
