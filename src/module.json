@@ -5,49 +5,16 @@
     "version": "0.2.1",
     "description": "Euclidean drum pattern sequencer, based on Mutable Instruments Grids",
     "author": "Mutable Instruments (port: move-grids)",
-    "license": "MIT",
+    "api_version": 2,
     "dsp": "dsp.so",
     "ui": "ui.js",
     "ui_chain": "ui_chain.js",
-    "api_version": 1,
+    "raw_ui": true,
     "capabilities": {
-        "audio_out": false,
-        "audio_in": false,
         "midi_in": true,
         "midi_out": true,
         "chainable": true,
-        "component_type": "midi_fx",
-        "ui_hierarchy": {
-            "levels": {
-                "root": {
-                    "name": "Grilles",
-                    "knobs": [
-                        "map_x",
-                        "map_y",
-                        "density_kick",
-                        "density_snare",
-                        "density_hat",
-                        "randomness",
-                        "kick_note",
-                        "snare_note"
-                    ],
-                    "params": [
-                        "map_x",
-                        "map_y",
-                        "density_kick",
-                        "density_snare",
-                        "density_hat",
-                        "randomness",
-                        "steps",
-                        "sync",
-                        "bpm",
-                        "kick_note",
-                        "snare_note",
-                        "hat_note"
-                    ]
-                }
-            }
-        }
+        "component_type": "midi_fx"
     },
     "chain_params": [
         {

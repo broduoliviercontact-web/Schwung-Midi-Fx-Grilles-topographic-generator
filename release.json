@@ -1,8 +1,8 @@
 {
   "id": "grids",
   "name": "Grilles",
-  "version": "0.2.1",
   "description": "Euclidean drum pattern sequencer, based on Mutable Instruments Grids",
-  "download_url": "https://github.com/broduoliviercontact-web/Grilles-Module-for-Schwung/releases/download/v0.2.1/grids-module.tar.gz",
-  "repo_url": "https://github.com/broduoliviercontact-web/Grilles-Module-for-Schwung"
+  "component_type": "midi_fx",
+  "version": "0.2.1",
+  "download_url": "https://github.com/broduoliviercontact-web/Schwung-Midi-Fx-Grilles-topographic-generator/releases/download/v0.2.1/grids-module.tar.gz"
 }

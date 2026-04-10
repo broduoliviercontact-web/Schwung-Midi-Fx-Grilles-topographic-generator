@@ -98,10 +98,10 @@ jobs:
           data = {
             "id": "${ID}",
             "name": "Grilles",
-            "version": "${VERSION}",
             "description": "Euclidean drum pattern sequencer, based on Mutable Instruments Grids",
-            "download_url": "https://github.com/${REPO}/releases/download/${TAG}/${TARBALL}",
-            "repo_url": "https://github.com/${REPO}"
+            "component_type": "midi_fx",
+            "version": "${VERSION}",
+            "download_url": "https://github.com/broduoliviercontact-web/Schwung-Midi-Fx-Grilles-topographic-generator/releases/download/${TAG}/${TARBALL}"
           }
 
           with open("release.json", "w") as f:
