@@ -13,6 +13,7 @@
 import {
   decodeDelta,
   isCapacitiveTouchMessage,
+  setLED as sharedSetLED,
 } from '/data/UserData/schwung/shared/input_filter.mjs';
 
 /* ── Constants ─────────────────────────────────────────────────────────── */
@@ -169,9 +170,7 @@ function padGlow(idx, mx, my) {
   return 0;
 }
 
-function setLED(note, vel) {
-  move_midi_internal_send([0, 0x90, note, vel]);
-}
+function setLED(note, vel) { sharedSetLED(note, vel); }
 
 function refreshPlayhead() {
   const raw = host_module_get_param('play_step');
