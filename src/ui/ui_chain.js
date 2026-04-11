@@ -1,33 +1,32 @@
 /**
- * ui_chain.js — Grilles compact chain UI
+ * ui_chain.js — Grilles compact chain UI (2 pages)
  *
- * Loaded by the Signal Chain host when Grilles sits in a MIDI FX slot.
- * Exposes globalThis.chain_ui = { init, tick, onMidiMessageInternal }.
+ * Page 1: X, Y, Kick density, Snare density, Hat density, Chaos
+ * Page 2: Kick note, Snare note, Hat note, Steps, Sync, BPM
  *
- * Shows only the 6 live-performance params: X, Y, Kick, Snare, Hat, Chaos.
- * Knobs 71–76 map directly to these six, same as the full UI.
- * Track buttons and jog wheel also work.
- *
- * ── Display layout (128×64) ──────────────────────────────────────────────
- *  y= 0  GRILLES  K.S.H.  07
- *  y=10  X [████████████████]
- *  y=18  Y [████████████████]
- *  y=27  K [████] S [████] H [██]
- *  y=36  ~ [██░░░░░░░░░░░░░░]
+ * Jog wheel navigates, jog click toggles edit mode.
+ * Cursor wraps between pages automatically.
  */
 
 'use strict';
 
 import {
   decodeDelta,
-  decodeAcceleratedDelta,
   isCapacitiveTouchMessage,
-  setLED as sharedSetLED,
 } from '/data/UserData/schwung/shared/input_filter.mjs';
 
 /* ── Constants ─────────────────────────────────────────────────────────── */
 
-const PAD_BASE = 68;
+const PAD_BASE     = 68;
+const CC_JOG_WHEEL = 14;
+const CC_JOG_CLICK = 3;
+const FLASH_TICKS  = 5;
+const PAGE_MAIN    = 0;
+const PAGE_PARAMS  = 1;
+
+const PAD_BRIGHT_NEAR = 0.07;
+const PAD_BRIGHT_MED  = 0.22;
+const PAD_BRIGHT_FAR  = 0.45;
 
 const KNOB_PARAMS = {
   71: 'map_x',
@@ -38,12 +37,16 @@ const KNOB_PARAMS = {
   76: 'randomness',
 };
 
-const TRACK_FOCUS = {
-  43: 'density_kick',
-  42: 'density_snare',
-  41: 'density_hat',
-  40: 'randomness',
-};
+const MAIN_PARAM_LIST = [
+  'map_x', 'map_y',
+  'density_kick', 'density_snare', 'density_hat',
+  'randomness',
+];
+
+const PARAMS_PARAM_LIST = [
+  'kick_note', 'snare_note', 'hat_note',
+  'steps', 'sync', 'bpm',
+];
 
 const PARAM_DEFAULTS = {
   map_x:         0.5,
@@ -55,27 +58,101 @@ const PARAM_DEFAULTS = {
   kick_note:     36,
   snare_note:    38,
   hat_note:      42,
+  steps:         16,
+  sync:          0,
+  bpm:           120,
 };
-
-const FLASH_TICKS = 5;
-const PAD_BRIGHT_NEAR = 0.07;
-const PAD_BRIGHT_MED  = 0.22;
-const PAD_BRIGHT_FAR  = 0.45;
 
 /* ── State ─────────────────────────────────────────────────────────────── */
 
 const s = {
-  params:       { ...PARAM_DEFAULTS },
-  step:         0,
-  flash:        [0, 0, 0],
-  focused:      null,
-  dirty:        true,
-  padLEDCache:  new Uint8Array(32),
-  padDirty:     true,
+  params:        { ...PARAM_DEFAULTS },
+  page:          PAGE_MAIN,
+  step:          0,
+  flash:         [0, 0, 0],
+  focused:       'map_x',
+  editing:       false,
+  dirty:         true,
+  padLEDCache:   new Uint8Array(32),
+  padDirty:      true,
   padDirtyPhase: 0,
 };
 
-/* ── Helpers ────────────────────────────────────────────────────────────── */
+/* ── Param helpers ─────────────────────────────────────────────────────── */
+
+function isIntParam(key) {
+  return key === 'kick_note' || key === 'snare_note' || key === 'hat_note' ||
+         key === 'steps' || key === 'bpm';
+}
+
+function clampParam(key, value) {
+  if (key === 'kick_note' || key === 'snare_note' || key === 'hat_note') {
+    const n = Math.round(value); return n < 0 ? 0 : n > 127 ? 127 : n;
+  }
+  if (key === 'steps') { const n = Math.round(value); return n < 1 ? 1 : n > 32 ? 32 : n; }
+  if (key === 'bpm')   { const n = Math.round(value); return n < 40 ? 40 : n > 240 ? 240 : n; }
+  if (key === 'sync')  { return Math.round(value) !== 0 ? 1 : 0; }
+  const v = value < 0 ? 0 : value > 1 ? 1 : value;
+  return v;
+}
+
+function formatParam(key, value) {
+  if (isIntParam(key) || key === 'sync') return String(Math.round(value));
+  return value.toFixed(4);
+}
+
+function jogDelta(key, d) {
+  if (isIntParam(key) || key === 'sync') return d > 0 ? 1 : -1;
+  return d * 0.005;
+}
+
+function dispVal(key) {
+  const v = s.params[key];
+  if (isIntParam(key)) return String(Math.round(v));
+  if (key === 'sync')  return Math.round(v) === 0 ? 'MOV' : 'INT';
+  return v.toFixed(2);
+}
+
+function setParam(key, value) {
+  const next = clampParam(key, value);
+  s.params[key] = next;
+  host_module_set_param(key, formatParam(key, next));
+  s.dirty = true;
+}
+
+/* ── Navigation ─────────────────────────────────────────────────────────── */
+
+function currentParamList() {
+  return s.page === PAGE_PARAMS ? PARAMS_PARAM_LIST : MAIN_PARAM_LIST;
+}
+
+function cyclePage(delta) {
+  s.page    = (s.page + delta + 2) % 2;
+  s.editing = false;
+}
+
+function moveCursor(delta) {
+  const list = currentParamList();
+  const idx  = list.indexOf(s.focused);
+  const raw  = idx < 0 ? 0 : idx + delta;
+  if (raw < 0) {
+    cyclePage(-1);
+    const nl = currentParamList();
+    s.focused = nl[nl.length - 1];
+  } else if (raw >= list.length) {
+    cyclePage(1);
+    s.focused = currentParamList()[0];
+  } else {
+    s.focused = list[raw];
+  }
+  s.dirty = true;
+}
+
+function foc(key) {
+  return s.focused === key ? (s.editing ? '[' : '>') : ' ';
+}
+
+/* ── Misc helpers ───────────────────────────────────────────────────────── */
 
 function clamp01(v) { return v < 0 ? 0 : v > 1 ? 1 : v; }
 
@@ -92,15 +169,8 @@ function padGlow(idx, mx, my) {
   return 0;
 }
 
-function setLED(note, vel) { sharedSetLED(note, vel); }
-
-function clampFloat(v) { return clamp01(v); }
-
-function setParam(key, value) {
-  const next = clampFloat(value);
-  s.params[key] = next;
-  host_module_set_param(key, next.toFixed(4));
-  s.dirty = true;
+function setLED(note, vel) {
+  move_midi_internal_send([0, 0x90, note, vel]);
 }
 
 function refreshPlayhead() {
@@ -115,40 +185,58 @@ function refreshPlayhead() {
 function drawBar(bx, by, bw, bh, value) {
   const filled = Math.round(clamp01(value) * bw);
   draw_rect(bx - 1, by - 1, bw + 2, bh + 2, 1);
-  if (filled > 0)    fill_rect(bx, by, filled, bh, 1);
-  if (filled < bw)   fill_rect(bx + filled, by, bw - filled, bh, 0);
+  if (filled > 0)  fill_rect(bx, by, filled, bh, 1);
+  if (filled < bw) fill_rect(bx + filled, by, bw - filled, bh, 0);
+}
+
+function renderMainPage() {
+  const p       = s.params;
+  const kDot    = s.flash[0] > 0 ? '*' : '.';
+  const sDot    = s.flash[1] > 0 ? '*' : '.';
+  const hDot    = s.flash[2] > 0 ? '*' : '.';
+  const stepNum = String(s.step + 1).padStart(2, '0');
+
+  print(0,   0, 'GRILLES 1/2', 1);
+  print(80,  0, `K${kDot}S${sDot}H${hDot}`, 1);
+  print(110, 0, stepNum, 1);
+
+  print(0, 10, `X${foc('map_x')}`, 1);
+  drawBar(16, 11, 108, 5, p.map_x);
+
+  print(0, 18, `Y${foc('map_y')}`, 1);
+  drawBar(16, 19, 108, 5, p.map_y);
+
+  print(0,  27, `K${foc('density_kick')}`,  1); drawBar(16,  28, 26, 5, p.density_kick);
+  print(44, 27, `S${foc('density_snare')}`, 1); drawBar(60,  28, 26, 5, p.density_snare);
+  print(88, 27, `H${foc('density_hat')}`,   1); drawBar(104, 28, 20, 5, p.density_hat);
+
+  print(0, 36, `~${foc('randomness')}`, 1);
+  drawBar(16, 37, 108, 5, p.randomness);
+
+  const mark = s.editing ? '[EDIT]' : '[ NAV]';
+  print(0, 54, `${mark} ${s.focused}: ${dispVal(s.focused)}`, 1);
+}
+
+function renderParamsPage() {
+  print(0, 0, 'GRILLES 2/2', 1);
+
+  print(0,  10, `K${foc('kick_note')}${dispVal('kick_note')}`, 1);
+  print(46, 10, `S${foc('snare_note')}${dispVal('snare_note')}`, 1);
+  print(92, 10, `H${foc('hat_note')}${dispVal('hat_note')}`, 1);
+
+  print(0, 26, `ST${foc('steps')}${dispVal('steps')}`, 1);
+
+  print(0,  42, `SY${foc('sync')}${dispVal('sync')}`, 1);
+  print(60, 42, `BP${foc('bpm')}${dispVal('bpm')}`, 1);
+
+  const mark = s.editing ? '[EDIT]' : '[ NAV]';
+  print(0, 54, `${mark} ${s.focused}: ${dispVal(s.focused)}`, 1);
 }
 
 function render() {
   clear_screen();
-  const p = s.params;
-
-  /* Title + trigger indicators + step */
-  const kDot   = s.flash[0] > 0 ? '*' : '.';
-  const sDot   = s.flash[1] > 0 ? '*' : '.';
-  const hDot   = s.flash[2] > 0 ? '*' : '.';
-  const stepNum = String(s.step + 1).padStart(2, '0');
-  print(0,   0, 'GRILLES', 1);
-  print(50,  0, `K${kDot}S${sDot}H${hDot}`, 1);
-  print(104, 0, stepNum, 1);
-
-  /* Map X / Y bars */
-  print(0, 10, 'X', 1);  drawBar(10, 11, 114, 5, p.map_x);
-  print(0, 18, 'Y', 1);  drawBar(10, 19, 114, 5, p.map_y);
-
-  /* Density bars */
-  const dw  = 32;
-  const focK = s.focused === 'density_kick'  ? '>' : ' ';
-  const focS = s.focused === 'density_snare' ? '>' : ' ';
-  const focH = s.focused === 'density_hat'   ? '>' : ' ';
-  print(0,  27, `K${focK}`, 1);  drawBar(13, 28, dw,      5, p.density_kick);
-  print(48, 27, `S${focS}`, 1);  drawBar(61, 28, dw,      5, p.density_snare);
-  print(96, 27, `H${focH}`, 1);  drawBar(109, 28, dw - 15, 5, p.density_hat);
-
-  /* Chaos bar */
-  const focC = s.focused === 'randomness' ? '>' : ' ';
-  print(0, 36, `~${focC}`, 1);
-  drawBar(13, 37, 111, 5, p.randomness);
+  if (s.page === PAGE_PARAMS) renderParamsPage();
+  else                        renderMainPage();
 }
 
 /* ── Pad LEDs ───────────────────────────────────────────────────────────── */
@@ -175,8 +263,12 @@ function init() {
     const raw = host_module_get_param(key);
     if (raw !== undefined && raw !== null) s.params[key] = parseFloat(raw);
   }
+  s.page    = PAGE_MAIN;
+  s.focused = 'map_x';
+  s.editing = false;
   refreshPlayhead();
   s.padDirty = true;
+  s.dirty    = true;
 }
 
 function tick() {
@@ -203,29 +295,40 @@ function onMidiMessageInternal(data) {
   const type   = status & 0xF0;
 
   if (type === 0xB0) {
+    // Knobs 71-76: direct control of main params
     if (b1 >= 71 && b1 <= 76 && KNOB_PARAMS[b1]) {
       const key   = KNOB_PARAMS[b1];
       const delta = decodeDelta(b2) * 0.01;
       setParam(key, s.params[key] + delta);
       s.focused = key;
+      s.editing = true;
+      s.page    = PAGE_MAIN;
       if (key === 'map_x' || key === 'map_y') s.padDirty = true;
       return;
     }
-    if (b1 >= 40 && b1 <= 43 && b2 > 0 && TRACK_FOCUS[b1]) {
-      s.focused = TRACK_FOCUS[b1];
-      s.dirty = true;
+
+    // Jog wheel: navigate or edit
+    if (b1 === CC_JOG_WHEEL) {
+      const d = decodeDelta(b2);
+      if (s.editing) {
+        setParam(s.focused, s.params[s.focused] + jogDelta(s.focused, d));
+        if (s.focused === 'map_x' || s.focused === 'map_y') s.padDirty = true;
+      } else {
+        moveCursor(d > 0 ? 1 : -1);
+      }
       return;
     }
-    if (b1 === 14 && s.focused && PARAM_DEFAULTS[s.focused] !== undefined) {
-      const delta = decodeDelta(b2) * 0.005;
-      setParam(s.focused, s.params[s.focused] + delta);
-      if (s.focused === 'map_x' || s.focused === 'map_y') s.padDirty = true;
+
+    // Jog click: toggle edit mode
+    if (b1 === CC_JOG_CLICK && b2 > 0) {
+      s.editing = !s.editing;
+      s.dirty   = true;
       return;
     }
   }
 
   if (type === 0x90 && b1 >= PAD_BASE && b1 < PAD_BASE + 32 && b2 > 0) {
-    const idx    = b1 - PAD_BASE;
+    const idx      = b1 - PAD_BASE;
     const { x, y } = padIndexToXY(idx);
     setParam('map_x', x);
     setParam('map_y', y);
@@ -235,14 +338,11 @@ function onMidiMessageInternal(data) {
 
 function onMidiMessageExternal(data) {
   if (!data || data.length < 2) return;
-  const status = data[0];
-  const b1     = data[1];
-  const b2     = data.length > 2 ? data[2] : 0;
-  if (status === 0x90 && b2 > 0) {
-    const p = s.params;
-    if (b1 === p.kick_note)  s.flash[0] = FLASH_TICKS;
-    if (b1 === p.snare_note) s.flash[1] = FLASH_TICKS;
-    if (b1 === p.hat_note)   s.flash[2] = FLASH_TICKS;
+  const b2 = data.length > 2 ? data[2] : 0;
+  if ((data[0] & 0xF0) === 0x90 && b2 > 0) {
+    if (data[1] === s.params.kick_note)  s.flash[0] = FLASH_TICKS;
+    if (data[1] === s.params.snare_note) s.flash[1] = FLASH_TICKS;
+    if (data[1] === s.params.hat_note)   s.flash[2] = FLASH_TICKS;
     s.dirty = true;
   }
 }
