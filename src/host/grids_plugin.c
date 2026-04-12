@@ -398,6 +398,45 @@ static void grids_set_param(void *instance, const char *key, const char *val)
     GridsInstance *gi = (GridsInstance *)instance;
     if (!gi || !key || !val) return;
 
+    if (strcmp(key, "state") == 0) {
+        /* Parse JSON state and apply each known parameter.
+         * Format: {"key":"value","key2":"value2",...}
+         * Simple parser: for each known key, find it in the JSON and extract
+         * the value string between the quotes after the colon. */
+        static const char *state_keys[] = {
+            "map_x", "map_y", "density_kick", "density_snare", "density_hat",
+            "randomness", "bpm", "sync", "steps",
+            "kick_note", "snare_note", "hat_note", NULL
+        };
+        for (int i = 0; state_keys[i]; i++) {
+            /* Build search pattern: "key" */
+            char pattern[64];
+            snprintf(pattern, sizeof(pattern), "\"%s\"", state_keys[i]);
+            const char *pos = strstr(val, pattern);
+            if (!pos) continue;
+            /* Skip past "key": to find the value */
+            pos += strlen(pattern);
+            /* Find the colon */
+            pos = strchr(pos, ':');
+            if (!pos) continue;
+            pos++;
+            /* Skip whitespace */
+            while (*pos == ' ' || *pos == '\t') pos++;
+            /* Extract value between quotes */
+            if (*pos != '"') continue;
+            pos++;
+            const char *end = strchr(pos, '"');
+            if (!end || (end - pos) >= 64) continue;
+            char vbuf[64];
+            int vlen = (int)(end - pos);
+            memcpy(vbuf, pos, vlen);
+            vbuf[vlen] = '\0';
+            /* Recursively apply via set_param */
+            grids_set_param(instance, state_keys[i], vbuf);
+        }
+        return;
+    }
+
     if      (strcmp(key, "map_x")         == 0)
         grids_set_map_xy(&gi->engine, parse_norm(val), gi->engine.map_y);
     else if (strcmp(key, "map_y")         == 0)
@@ -490,6 +529,27 @@ static int grids_get_param(void *instance, const char *key,
     if (strcmp(key, "preview_hat_2") == 0)   return write_preview_chunk(gi, 2,  4, buf, buf_len);
     if (strcmp(key, "preview_hat_3") == 0)   return write_preview_chunk(gi, 2,  8, buf, buf_len);
     if (strcmp(key, "preview_hat_4") == 0)   return write_preview_chunk(gi, 2, 12, buf, buf_len);
+
+    if (strcmp(key, "state") == 0) {
+        return snprintf(buf, buf_len,
+            "{\"map_x\":\"%.4f\",\"map_y\":\"%.4f\","
+            "\"density_kick\":\"%.4f\",\"density_snare\":\"%.4f\",\"density_hat\":\"%.4f\","
+            "\"randomness\":\"%.4f\","
+            "\"bpm\":\"%.1f\",\"sync\":\"%d\",\"steps\":\"%u\","
+            "\"kick_note\":\"%d\",\"snare_note\":\"%d\",\"hat_note\":\"%d\"}",
+            gi->engine.map_x      / 255.0f,
+            gi->engine.map_y      / 255.0f,
+            gi->engine.density[0] / 255.0f,
+            gi->engine.density[1] / 255.0f,
+            gi->engine.density[2] / 255.0f,
+            gi->engine.randomness / 255.0f,
+            gi->internal_bpm,
+            gi->sync_mode,
+            gi->step_length,
+            gi->note[0],
+            gi->note[1],
+            gi->note[2]);
+    }
 
     float v = -1.0f;
     if      (strcmp(key, "map_x")         == 0) v = gi->engine.map_x      / 255.0f;
